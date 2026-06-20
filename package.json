@@ -1,0 +1,40 @@
+{
+  "name": "acanvas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ACANVAS local-first dark metacanvas for Windows x64.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.2",
+    "uuid": "^11.0.3",
+    "vite": "^6.0.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0",
+    "@tauri-apps/cli": "^2.2.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.2",
+    "@types/uuid": "^10.0.0",
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}

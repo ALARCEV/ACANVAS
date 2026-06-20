@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+.vite/
+*.log
+*.local
+acanvas-screenshot.png
+dev-server*.log
+test-results/
+playwright-report/
