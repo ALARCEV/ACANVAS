@@ -1,5 +1,7 @@
-import {
+﻿import {
   Archive,
+  PanelRightClose,
+  PanelRightOpen,
   Brush,
   ChevronRight,
   Columns3,
@@ -10,7 +12,6 @@ import {
   FolderOpen,
   Heading1,
   Home,
-  Image,
   Link,
   ListTodo,
   MessageSquare,
@@ -32,7 +33,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import type { Board, CanvasCard, CardType, DrawStroke, DropPayload, LineContent, WorkspaceState } from "../types";
 import type { BoardContent, ColumnContent, FolderContent, LinkContent, TodoContent } from "../types";
-import { fetchPreviewFromBackend, loadWorkspaceFromBackend, openPathWithBackend, saveWorkspaceToBackend } from "../lib/backend";
+import {
+  backupNowWithBackend,
+  checkForDesktopUpdate,
+  fetchPreviewFromBackend,
+  getBackupDirFromBackend,
+  loadWorkspaceFromBackend,
+  openPathWithBackend,
+  revealPathWithBackend,
+  saveWorkspaceToBackend,
+  selectBackupDirWithDialog,
+  setBackupDirInBackend
+} from "../lib/backend";
 import { createId, nowIso } from "../lib/ids";
 import { exportWorkspaceJson, loadWorkspace, saveWorkspace } from "../lib/storage";
 import { normalizeUrl, titleFromUrl } from "../lib/url";
@@ -47,12 +59,14 @@ const toolbar: Array<{ type: CardType; label: string; icon: typeof StickyNote }>
   { type: "folder", label: "Folder", icon: FolderOpen },
   { type: "column", label: "Column", icon: Columns3 },
   { type: "comment", label: "Comment", icon: MessageSquare },
-  { type: "image", label: "Add image", icon: Image },
   { type: "file", label: "Upload", icon: Upload }
 ];
 
 const colors = ["#f0b86e", "#f26f66", "#6fc7e8", "#79c58a", "#b986e8", "#f2d76b"];
 const drawColors = ["#f0b86e", "#f26f66", "#6fc7e8", "#79c58a", "#b986e8", "#f2d76b", "#e5edf7", "#151b26"];
+const minZoom = 0.08;
+const maxZoom = 5;
+const zoomStep = 0.15;
 
 interface SelectionRect {
   start: { x: number; y: number };
@@ -66,17 +80,40 @@ interface NormalizedRect {
   height: number;
 }
 
+interface EntityClipboard {
+  mode: "copy" | "cut";
+  cardIds: string[];
+  sourceBoardId: string;
+  anchor: { x: number; y: number };
+  snapshot?: {
+    cards: CanvasCard[];
+    boards: Board[];
+  };
+}
+
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => loadWorkspace());
   const [draggingCard, setDraggingCard] = useState<string | null>(null);
   const [resizingCard, setResizingCard] = useState<string | null>(null);
   const [selectionRect, setSelectionRect] = useState<SelectionRect | null>(null);
   const [activeStroke, setActiveStroke] = useState<DrawStroke | null>(null);
+  const [panningCanvas, setPanningCanvas] = useState(false);
+  const [collapsedMarkdownIds, setCollapsedMarkdownIds] = useState<string[]>([]);
+  const [entityClipboard, setEntityClipboard] = useState<EntityClipboard | null>(null);
+  const [cutCardIds, setCutCardIds] = useState<string[]>([]);
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightPanelMode, setRightPanelMode] = useState<"unsorted" | "trash" | "settings">("unsorted");
   const [search, setSearch] = useState("");
   const [spacePressed, setSpacePressed] = useState(false);
+  const [backupDir, setBackupDir] = useState<string | null>(null);
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [updateMessage, setUpdateMessage] = useState("");
   const boardRef = useRef<HTMLDivElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const dragOffset = useRef({ x: 0, y: 0 });
   const lastPointerPoint = useRef({ x: 0, y: 0 });
+  const lastCanvasClientPoint = useRef({ x: 360, y: 260 });
+  const panStart = useRef({ clientX: 0, clientY: 0, x: 0, y: 0 });
 
   useEffect(() => {
     saveWorkspace(workspace);
@@ -100,11 +137,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    getBackupDirFromBackend()
+      .then((path) => setBackupDir(path))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     const down = (event: KeyboardEvent) => {
       if (event.code === "Space") setSpacePressed(true);
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         undo();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "x" && !isEditableElement(document.activeElement)) {
+        if (workspace.selectedCardIds.length > 0) {
+          event.preventDefault();
+          cutSelectedCards();
+        }
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && !isEditableElement(document.activeElement)) {
+        if (workspace.selectedCardIds.length > 0) {
+          event.preventDefault();
+          copySelectedCards();
+        }
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
         event.preventDefault();
@@ -128,16 +183,39 @@ export function App() {
     };
   });
 
+  useEffect(() => {
+    const paste = (event: ClipboardEvent) => {
+      if (isEditableElement(document.activeElement)) return;
+      if (entityClipboard) {
+        event.preventDefault();
+        pasteEntityClipboard();
+        return;
+      }
+      const clipboard = event.clipboardData;
+      if (!clipboard) return;
+      const handled = pasteClipboardData(clipboard);
+      if (handled) event.preventDefault();
+    };
+    window.addEventListener("paste", paste);
+    return () => window.removeEventListener("paste", paste);
+  });
+
   const currentBoard = workspace.boards.find((board) => board.id === workspace.currentBoardId) ?? workspace.boards[0];
   const columnChildIds = useMemo(() => getColumnChildIds(workspace.cards, currentBoard.id), [workspace.cards, currentBoard.id]);
   const visibleCards = workspace.cards
     .filter((card) => card.boardId === currentBoard.id && !card.trashedAt)
+    .filter((card) => !cutCardIds.includes(card.id))
+    .filter((card) => !workspace.unsortedCardIds.includes(card.id))
     .filter((card) => card.type === "line" || !columnChildIds.has(card.id))
     .filter((card) => matchesSearch(card, search))
     .sort((a, b) => a.zIndex - b.zIndex);
   const renderCards = visibleCards.map((card) => resolveLineCard(card, workspace.cards));
   const visibleStrokes = workspace.drawingStrokes.filter((stroke) => stroke.boardId === currentBoard.id && !stroke.trashedAt);
   const trashCount = workspace.cards.filter((card) => card.trashedAt).length;
+  const unsortedCards = workspace.unsortedCardIds
+    .map((id) => workspace.cards.find((card) => card.id === id && !card.trashedAt))
+    .filter((card): card is CanvasCard => Boolean(card));
+  const trashedCards = workspace.cards.filter((card) => card.trashedAt);
   const boardPath = useMemo(() => getBoardPath(workspace.boards, currentBoard.id), [workspace.boards, currentBoard.id]);
 
   function update(mutator: (draft: WorkspaceState) => WorkspaceState, saveHistory = true) {
@@ -149,6 +227,7 @@ export function App() {
         assets: [...current.assets],
         drawingStrokes: current.drawingStrokes.map((stroke) => ({ ...stroke, points: [...stroke.points] })),
         drawingSettings: { ...current.drawingSettings },
+        unsortedCardIds: [...current.unsortedCardIds],
         selectedCardIds: [...current.selectedCardIds]
       });
       if (!saveHistory) return next;
@@ -208,7 +287,7 @@ export function App() {
           id: createId("board"),
           parentBoardId: currentBoard.id,
           title: "New board",
-          icon: "◆",
+          icon: "в—†",
           color,
           createdAt: now,
           updatedAt: now,
@@ -248,6 +327,7 @@ export function App() {
         }
       } else if (type === "file" || type === "image") {
         const objectUrl = file ? URL.createObjectURL(file) : undefined;
+        const sourcePath = getDroppedFilePath(file);
         const assetId = createId("asset");
         draft.assets.push({
           id: assetId,
@@ -255,14 +335,17 @@ export function App() {
           mimeType: file?.type ?? "application/octet-stream",
           size: file?.size ?? 0,
           objectUrl,
+          sourcePath,
           createdAt: now
         });
-        card = makeCard(id, file?.type.startsWith("image/") ? "image" : type, x, y, 300, type === "image" ? 250 : 150, draft.cards.length + 1, {
+        const droppedType = file ? resolveDroppedFileType(file) : type;
+        card = makeCard(id, droppedType, x, y, 300, droppedType === "image" ? 250 : 150, draft.cards.length + 1, {
           assetId,
           fileName: file?.name ?? "Local file",
           mimeType: file?.type ?? "application/octet-stream",
           size: file?.size ?? 0,
-          thumbnailUrl: objectUrl
+          thumbnailUrl: objectUrl,
+          sourcePath
         });
       } else if (type === "folder") {
         const path = window.prompt("Windows folder or shortcut path", "C:\\\\");
@@ -281,12 +364,96 @@ export function App() {
     });
   }
 
+  function createLinkCard(url: string, x: number, y: number) {
+    const normalizedUrl = normalizeUrl(url);
+    if (!normalizedUrl) return;
+    const id = createId("card");
+    update((draft) => {
+      const card = makeCard(id, "link", x, y, 320, 220, draft.cards.length + 1, {
+        url: normalizedUrl,
+        title: titleFromUrl(normalizedUrl),
+        description: "Preview metadata will be fetched by the Tauri backend in the desktop build.",
+        showImage: true,
+        showDescription: true
+      });
+      draft.cards.push(card);
+      draft.selectedCardIds = [card.id];
+      return draft;
+    });
+    fetchPreviewFromBackend(normalizedUrl)
+      .then((preview) => {
+        if (!preview) return;
+        updateCardContent(id, {
+          title: preview.title,
+          description: preview.description,
+          imageUrl: preview.image_url
+        });
+      })
+      .catch(() => undefined);
+  }
+
+  function createTextNote(text: string, x: number, y: number) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const id = createId("card");
+    update((draft) => {
+      const card = makeCard(id, "note", x, y, 340, 240, draft.cards.length + 1, {
+        text: trimmed,
+        format: "normal"
+      });
+      draft.cards.push(card);
+      draft.selectedCardIds = [card.id];
+      return draft;
+    });
+  }
+
+  function pasteClipboardData(clipboard: DataTransfer) {
+    const point = canvasPoint(lastCanvasClientPoint.current.x, lastCanvasClientPoint.current.y);
+    const files = Array.from(clipboard.files);
+    if (files.length > 0) {
+      files.forEach((file, index) => createCard(resolveDroppedFileType(file), point.x + index * 24, point.y + index * 24, file));
+      return true;
+    }
+
+    const imageItem = Array.from(clipboard.items).find((item) => item.kind === "file" && item.type.startsWith("image/"));
+    const imageFile = imageItem?.getAsFile();
+    if (imageFile) {
+      createCard("image", point.x, point.y, imageFile);
+      return true;
+    }
+
+    const text = clipboard.getData("text/plain").trim();
+    if (!text) return false;
+    const pastedUrl = extractSingleUrl(text);
+    if (pastedUrl) {
+      createLinkCard(pastedUrl, point.x, point.y);
+    } else {
+      createTextNote(text, point.x, point.y);
+    }
+    return true;
+  }
+
   function handleToolClick(type: CardType) {
+    if (type === "file") {
+      uploadInputRef.current?.click();
+      return;
+    }
     if (type === "line" && workspace.selectedCardIds.length >= 2) {
       createConnectorBetween(workspace.selectedCardIds[0], workspace.selectedCardIds[1]);
       return;
     }
     createCard(type, 160, 140);
+  }
+
+  function handleUploadFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+    const rect = boardRef.current?.getBoundingClientRect();
+    const point = rect
+      ? canvasPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+      : canvasPoint(lastCanvasClientPoint.current.x, lastCanvasClientPoint.current.y);
+    files.forEach((file, index) => createCard(resolveDroppedFileType(file), point.x + index * 24, point.y + index * 24, file));
+    event.target.value = "";
   }
 
   function toggleDraw() {
@@ -474,6 +641,17 @@ export function App() {
     event.dataTransfer.effectAllowed = "copy";
   }
 
+  function handleColumnChildDrag(cardId: string, columnId: string, event: React.DragEvent) {
+    event.stopPropagation();
+    event.dataTransfer.setData("application/acanvas-column-child", JSON.stringify({ cardId, columnId }));
+    event.dataTransfer.effectAllowed = "move";
+  }
+
+  function handleUnsortedDrag(cardId: string, event: React.DragEvent) {
+    event.dataTransfer.setData("application/acanvas-unsorted-card", JSON.stringify({ cardId }));
+    event.dataTransfer.effectAllowed = "move";
+  }
+
   function handleCanvasDrop(event: React.DragEvent) {
     event.preventDefault();
     const point = canvasPoint(event.clientX, event.clientY);
@@ -483,11 +661,24 @@ export function App() {
       createCard(payload.kind, point.x, point.y);
       return;
     }
+    const columnChild = event.dataTransfer.getData("application/acanvas-column-child");
+    if (columnChild) {
+      const payload = JSON.parse(columnChild) as { cardId: string; columnId: string };
+      moveCardOutOfColumn(payload.cardId, payload.columnId, point);
+      return;
+    }
+    const unsortedCard = event.dataTransfer.getData("application/acanvas-unsorted-card");
+    if (unsortedCard) {
+      const payload = JSON.parse(unsortedCard) as { cardId: string };
+      moveCardFromUnsorted(payload.cardId, point);
+      return;
+    }
     const files = Array.from(event.dataTransfer.files);
-    files.forEach((file, index) => createCard(file.type.startsWith("image/") ? "image" : "file", point.x + index * 24, point.y + index * 24, file));
+    files.forEach((file, index) => createCard(resolveDroppedFileType(file), point.x + index * 24, point.y + index * 24, file));
   }
 
   function startDrag(card: CanvasCard, event: React.PointerEvent) {
+    if (spacePressed) return;
     if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
     const point = canvasPoint(event.clientX, event.clientY);
     dragOffset.current = { x: point.x - card.x, y: point.y - card.y };
@@ -499,13 +690,23 @@ export function App() {
         : [card.id];
       const maxZ = Math.max(0, ...draft.cards.map((item) => item.zIndex));
       const target = draft.cards.find((item) => item.id === card.id);
-      if (target) target.zIndex = maxZ + 1;
+      if (target && target.type !== "line") target.zIndex = maxZ + 1;
       return draft;
     }, false);
   }
 
   function moveCard(event: React.PointerEvent) {
-    if (!draggingCard && !resizingCard && !selectionRect && !activeStroke) return;
+    lastCanvasClientPoint.current = { x: event.clientX, y: event.clientY };
+    if (!draggingCard && !resizingCard && !selectionRect && !activeStroke && !panningCanvas) return;
+    if (panningCanvas) {
+      const dx = event.clientX - panStart.current.clientX;
+      const dy = event.clientY - panStart.current.clientY;
+      setWorkspace((current) => ({
+        ...current,
+        pan: { x: panStart.current.x + dx, y: panStart.current.y + dy }
+      }));
+      return;
+    }
     const point = canvasPoint(event.clientX, event.clientY);
     lastPointerPoint.current = point;
     if (activeStroke || (workspace.drawingSettings.enabled && workspace.drawingSettings.tool === "eraser" && event.buttons === 1)) {
@@ -541,6 +742,10 @@ export function App() {
   }
 
   function endPointer() {
+    if (panningCanvas) {
+      setPanningCanvas(false);
+      return;
+    }
     if (activeStroke) {
       finishDrawing();
       return;
@@ -617,6 +822,17 @@ export function App() {
 
   function startMarquee(event: React.PointerEvent<HTMLElement>) {
     if (event.button !== 0) return;
+    if (spacePressed) {
+      panStart.current = {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        x: workspace.pan.x,
+        y: workspace.pan.y
+      };
+      setPanningCanvas(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
     if (startDrawing(event)) return;
     if ((event.target as HTMLElement).closest(".card, button, input, textarea, a")) return;
     const point = canvasPoint(event.clientX, event.clientY);
@@ -635,6 +851,13 @@ export function App() {
       if (target) {
         target.content = { ...target.content, ...patch } as CanvasCard["content"];
         target.updatedAt = nowIso();
+        if (target.type === "board" && "boardId" in target.content && "title" in patch) {
+          const boardContent = target.content as BoardContent;
+          const nextTitle = String(patch.title ?? boardContent.title);
+          draft.boards = draft.boards.map((board) =>
+            board.id === boardContent.boardId ? { ...board, title: nextTitle, updatedAt: nowIso() } : board
+          );
+        }
       }
       return draft;
     });
@@ -646,7 +869,19 @@ export function App() {
     });
   }
 
+  function revealFolderPath(path: string) {
+    revealPathWithBackend(path).catch((error) => {
+      window.alert(error instanceof Error ? error.message : "Unable to reveal path");
+    });
+  }
+
   function popOutFromColumn(cardId: string, columnId: string) {
+    const column = workspace.cards.find((card) => card.id === columnId);
+    const target = column ? { x: column.x + column.width + 28, y: column.y + 24 } : { x: 180, y: 180 };
+    moveCardOutOfColumn(cardId, columnId, target);
+  }
+
+  function moveCardOutOfColumn(cardId: string, columnId: string, point: { x: number; y: number }) {
     update((draft) => {
       const column = draft.cards.find((card) => card.id === columnId);
       const child = draft.cards.find((card) => card.id === cardId);
@@ -656,12 +891,208 @@ export function App() {
         ...content,
         childCardIds: content.childCardIds.filter((id) => id !== cardId)
       };
-      child.x = column.x + column.width + 28;
-      child.y = column.y + 24 + content.childCardIds.indexOf(cardId) * 26;
+      child.boardId = currentBoard.id;
+      child.x = Math.round(point.x);
+      child.y = Math.round(point.y);
       child.zIndex = Math.max(0, ...draft.cards.map((card) => card.zIndex)) + 1;
       child.updatedAt = nowIso();
       draft.selectedCardIds = [child.id];
       return draft;
+    });
+  }
+
+  function moveCardFromUnsorted(cardId: string, point: { x: number; y: number }) {
+    update((draft) => {
+      const card = draft.cards.find((candidate) => candidate.id === cardId);
+      if (!card) return draft;
+      draft.unsortedCardIds = draft.unsortedCardIds.filter((id) => id !== cardId);
+      card.boardId = currentBoard.id;
+      card.x = Math.round(point.x);
+      card.y = Math.round(point.y);
+      card.zIndex = Math.max(0, ...draft.cards.map((candidate) => candidate.zIndex)) + 1;
+      card.updatedAt = nowIso();
+      draft.selectedCardIds = [card.id];
+      return draft;
+    });
+  }
+
+  function sendSelectedToUnsorted() {
+    update((draft) => {
+      draft.unsortedCardIds = Array.from(new Set([...draft.unsortedCardIds, ...draft.selectedCardIds]));
+      draft.selectedCardIds = [];
+      return draft;
+    });
+    setRightPanelOpen(true);
+    setRightPanelMode("unsorted");
+  }
+
+  function cutSelectedCards() {
+    const cardIds = expandCutCardIds(workspace.selectedCardIds, workspace.cards);
+    const cards = workspace.cards.filter((card) => cardIds.includes(card.id) && !card.trashedAt);
+    if (cards.length === 0) return;
+    const anchor = {
+      x: Math.min(...cards.map((card) => card.x)),
+      y: Math.min(...cards.map((card) => card.y))
+    };
+    setEntityClipboard({ mode: "cut", cardIds, sourceBoardId: currentBoard.id, anchor });
+    setCutCardIds(cardIds);
+    update((draft) => {
+      draft.selectedCardIds = [];
+      return draft;
+    }, false);
+    navigator.clipboard?.writeText(`ACANVAS cut: ${cards.length} ${cards.length === 1 ? "entity" : "entities"}`).catch(() => undefined);
+  }
+
+  function copySelectedCards() {
+    const cardIds = expandCutCardIds(workspace.selectedCardIds, workspace.cards);
+    const cards = workspace.cards.filter((card) => cardIds.includes(card.id) && !card.trashedAt);
+    if (cards.length === 0) return;
+    const boardIds = new Set<string>();
+    cards.forEach((card) => {
+      if (card.type === "board" && "boardId" in card.content) {
+        collectBoardSubtreeIds((card.content as BoardContent).boardId, workspace.boards, boardIds);
+      }
+    });
+    const anchor = {
+      x: Math.min(...cards.map((card) => card.x)),
+      y: Math.min(...cards.map((card) => card.y))
+    };
+    setEntityClipboard({
+      mode: "copy",
+      cardIds,
+      sourceBoardId: currentBoard.id,
+      anchor,
+      snapshot: {
+        cards: deepClone(cards),
+        boards: deepClone(workspace.boards.filter((board) => boardIds.has(board.id)))
+      }
+    });
+    setCutCardIds([]);
+    navigator.clipboard?.writeText(`ACANVAS copy: ${cards.length} ${cards.length === 1 ? "entity" : "entities"}`).catch(() => undefined);
+  }
+
+  function pasteEntityClipboard() {
+    if (!entityClipboard) return;
+    if (entityClipboard.mode === "copy") {
+      pasteCopiedCards(entityClipboard);
+      return;
+    }
+    pasteCutCards(entityClipboard);
+  }
+
+  function pasteCutCards(clipboard: EntityClipboard) {
+    const point = canvasPoint(lastCanvasClientPoint.current.x, lastCanvasClientPoint.current.y);
+    update((draft) => {
+      const now = nowIso();
+      const existingCards = draft.cards.filter((card) => clipboard.cardIds.includes(card.id));
+      if (existingCards.length === 0) return draft;
+      const delta = {
+        x: Math.round(point.x - clipboard.anchor.x),
+        y: Math.round(point.y - clipboard.anchor.y)
+      };
+      const maxZ = Math.max(0, ...draft.cards.map((card) => card.zIndex));
+      const movedCardIds = new Set(existingCards.map((card) => card.id));
+      const movedBoardIds = new Set<string>();
+
+      existingCards.forEach((card, index) => {
+        card.boardId = currentBoard.id;
+        card.x = Math.round(card.x + delta.x);
+        card.y = Math.round(card.y + delta.y);
+        card.zIndex = card.type === "line" ? card.zIndex : maxZ + index + 1;
+        card.updatedAt = now;
+        if (card.type === "board" && "boardId" in card.content) {
+          movedBoardIds.add((card.content as BoardContent).boardId);
+        }
+      });
+
+      draft.boards = draft.boards.map((board) =>
+        movedBoardIds.has(board.id)
+          ? { ...board, parentBoardId: currentBoard.id, updatedAt: now }
+          : board
+      );
+      draft.unsortedCardIds = draft.unsortedCardIds.filter((id) => !movedCardIds.has(id));
+      draft.selectedCardIds = existingCards.map((card) => card.id);
+      return draft;
+    });
+    setEntityClipboard(null);
+    setCutCardIds([]);
+  }
+
+  function pasteCopiedCards(clipboard: EntityClipboard) {
+    if (!clipboard.snapshot) return;
+    const point = canvasPoint(lastCanvasClientPoint.current.x, lastCanvasClientPoint.current.y);
+    update((draft) => {
+      const now = nowIso();
+      const idMap = new Map<string, string>();
+      const boardIdMap = new Map<string, string>();
+      clipboard.snapshot?.boards.forEach((board) => boardIdMap.set(board.id, createId("board")));
+      clipboard.snapshot?.cards.forEach((card) => idMap.set(card.id, createId("card")));
+      const delta = {
+        x: Math.round(point.x - clipboard.anchor.x),
+        y: Math.round(point.y - clipboard.anchor.y)
+      };
+      const maxZ = Math.max(0, ...draft.cards.map((card) => card.zIndex));
+      const copiedBoards = clipboard.snapshot?.boards.map((board) => ({
+        ...board,
+        id: boardIdMap.get(board.id) ?? createId("board"),
+        parentBoardId: board.parentBoardId && boardIdMap.has(board.parentBoardId)
+          ? boardIdMap.get(board.parentBoardId) ?? currentBoard.id
+          : currentBoard.id,
+        title: `${board.title} copy`,
+        createdAt: now,
+        updatedAt: now,
+        trashedAt: null
+      })) ?? [];
+      const copiedCards = (clipboard.snapshot?.cards ?? []).map((card, index) => {
+        const next = deepClone(card);
+        next.id = idMap.get(card.id) ?? createId("card");
+        next.boardId = currentBoard.id;
+        next.x = Math.round(card.x + delta.x);
+        next.y = Math.round(card.y + delta.y);
+        next.zIndex = next.type === "line" ? card.zIndex : maxZ + index + 1;
+        next.createdAt = now;
+        next.updatedAt = now;
+        next.trashedAt = null;
+        if (next.type === "column" && "childCardIds" in next.content) {
+          const content = next.content as ColumnContent;
+          content.childCardIds = content.childCardIds.map((id) => idMap.get(id) ?? id);
+        }
+        if (next.type === "line" && "points" in next.content) {
+          const content = next.content as LineContent;
+          if (content.sourceCardId) content.sourceCardId = idMap.get(content.sourceCardId) ?? content.sourceCardId;
+          if (content.targetCardId) content.targetCardId = idMap.get(content.targetCardId) ?? content.targetCardId;
+        }
+        if (next.type === "board" && "boardId" in next.content) {
+          const content = next.content as BoardContent;
+          const newBoardId = boardIdMap.get(content.boardId) ?? createId("board");
+          content.boardId = newBoardId;
+          content.title = `${content.title} copy`;
+        }
+        return next;
+      });
+      draft.boards.push(...copiedBoards);
+      draft.cards.push(...copiedCards);
+      draft.selectedCardIds = copiedCards.map((card) => card.id);
+      return draft;
+    });
+  }
+
+  function restoreCard(cardId: string) {
+    update((draft) => {
+      draft.cards = draft.cards.map((card) => (card.id === cardId ? { ...card, trashedAt: null } : card));
+      return draft;
+    });
+  }
+
+  function deleteCardPermanently(cardId: string) {
+    update((draft) => {
+      return purgeCardsFromDraft(draft, [cardId]);
+    });
+  }
+
+  function deleteAllTrash() {
+    update((draft) => {
+      return purgeCardsFromDraft(draft, draft.cards.filter((card) => card.trashedAt).map((card) => card.id));
     });
   }
 
@@ -670,13 +1101,6 @@ export function App() {
       const now = nowIso();
       draft.cards = draft.cards.map((card) => (draft.selectedCardIds.includes(card.id) ? { ...card, trashedAt: now } : card));
       draft.selectedCardIds = [];
-      return draft;
-    });
-  }
-
-  function restoreTrash() {
-    update((draft) => {
-      draft.cards = draft.cards.map((card) => ({ ...card, trashedAt: null }));
       return draft;
     });
   }
@@ -691,8 +1115,49 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function chooseBackupFolder() {
+    setSettingsMessage("");
+    try {
+      const selected = await selectBackupDirWithDialog();
+      if (!selected) return;
+      await setBackupDirInBackend(selected);
+      setBackupDir(selected);
+      setSettingsMessage("Backup folder saved. ACANVAS will keep the latest workspace snapshot there.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "Unable to choose backup folder.");
+    }
+  }
+
+  async function runBackupNow() {
+    setSettingsMessage("");
+    try {
+      const path = await backupNowWithBackend();
+      setSettingsMessage(path ? `Backup updated: ${path}` : "Choose a backup folder first.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "Unable to update backup.");
+    }
+  }
+
+  async function checkForUpdates() {
+    setUpdateMessage("");
+    try {
+      const status = await checkForDesktopUpdate();
+      setUpdateMessage(status === "available" ? "Update is available. Install it from the release notification." : "ACANVAS is up to date.");
+    } catch (error) {
+      setUpdateMessage(error instanceof Error ? error.message : "Unable to check for updates.");
+    }
+  }
+
   return (
-    <div className="app">
+    <div className={`app ${rightPanelOpen ? "" : "rightPanelClosed"}`}>
+      <input
+        ref={uploadInputRef}
+        className="hiddenFileInput"
+        data-testid="upload-input"
+        type="file"
+        multiple
+        onChange={handleUploadFiles}
+      />
       <header className="topbar">
         <button className="brandButton" onClick={() => setWorkspace((state) => ({ ...state, currentBoardId: "board_home" }))}>
           <Home size={17} />
@@ -716,7 +1181,15 @@ export function App() {
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
           </label>
           <button title="Export JSON" onClick={exportJson}><Download size={18} /></button>
-          <button title="Settings"><Settings size={18} /></button>
+          <button
+            title="Settings"
+            onClick={() => {
+              setRightPanelOpen(true);
+              setRightPanelMode("settings");
+            }}
+          >
+            <Settings size={18} />
+          </button>
         </div>
       </header>
 
@@ -726,9 +1199,15 @@ export function App() {
           return (
             <button
               key={tool.type}
-              draggable
+              draggable={tool.type !== "file"}
               title={tool.label}
-              onDragStart={(event) => handleToolbarDrag({ kind: tool.type, label: tool.label }, event)}
+              onDragStart={(event) => {
+                if (tool.type === "file") {
+                  event.preventDefault();
+                  return;
+                }
+                handleToolbarDrag({ kind: tool.type, label: tool.label }, event);
+              }}
               onClick={() => handleToolClick(tool.type)}
             >
               <Icon size={20} />
@@ -744,7 +1223,14 @@ export function App() {
           <PenLine size={20} />
           <span>Draw</span>
         </button>
-        <button className="trashButton" title="Restore trash" onClick={restoreTrash}>
+        <button
+          className={`trashButton ${rightPanelMode === "trash" && rightPanelOpen ? "isActiveTool" : ""}`}
+          title="Open trash"
+          onClick={() => {
+            setRightPanelOpen(true);
+            setRightPanelMode("trash");
+          }}
+        >
           <Trash2 size={20} />
           <span>Trash {trashCount}</span>
         </button>
@@ -752,7 +1238,7 @@ export function App() {
 
       <main
         ref={boardRef}
-        className={`canvasHost ${spacePressed ? "isPanning" : ""}`}
+        className={`canvasHost ${spacePressed || panningCanvas ? "isPanning" : ""} ${panningCanvas ? "isPanningActive" : ""}`}
         onDragOver={(event) => event.preventDefault()}
         onDrop={handleCanvasDrop}
         onPointerDown={startMarquee}
@@ -762,7 +1248,7 @@ export function App() {
         onWheel={(event) => {
           if (!event.ctrlKey) return;
           event.preventDefault();
-          const nextZoom = Math.min(1.8, Math.max(0.45, workspace.zoom - event.deltaY * 0.001));
+          const nextZoom = clampZoom(workspace.zoom - event.deltaY * 0.0015);
           setWorkspace((state) => ({ ...state, zoom: Number(nextZoom.toFixed(2)) }));
         }}
       >
@@ -781,25 +1267,52 @@ export function App() {
               }}
               onOpenBoard={(boardId) => setWorkspace((state) => ({ ...state, currentBoardId: boardId, selectedCardIds: [] }))}
               onOpenPath={openFolderPath}
+              onRevealPath={revealFolderPath}
               onPopOutFromColumn={popOutFromColumn}
+              onColumnChildDrag={handleColumnChildDrag}
               onChange={(patch) => updateCardContent(card.id, patch)}
+              onUpdateCardContent={updateCardContent}
+              noteSourceCollapsed={collapsedMarkdownIds.includes(card.id)}
+              onToggleNoteSource={() =>
+                setCollapsedMarkdownIds((ids) =>
+                  ids.includes(card.id) ? ids.filter((id) => id !== card.id) : [...ids, card.id]
+                )
+              }
             />
           ))}
         </div>
         {selectionRect && <SelectionBox rect={normalizeRect(selectionRect.start, selectionRect.current)} zoom={workspace.zoom} pan={workspace.pan} />}
         <div className="zoomDock">
-          <button onClick={() => setWorkspace((state) => ({ ...state, zoom: Math.max(0.45, state.zoom - 0.1) }))}>-</button>
+          <button onClick={() => setWorkspace((state) => ({ ...state, zoom: clampZoom(state.zoom - zoomStep) }))}>-</button>
           <span>{Math.round(workspace.zoom * 100)}%</span>
-          <button onClick={() => setWorkspace((state) => ({ ...state, zoom: Math.min(1.8, state.zoom + 0.1) }))}>+</button>
+          <button onClick={() => setWorkspace((state) => ({ ...state, zoom: clampZoom(state.zoom + zoomStep) }))}>+</button>
         </div>
       </main>
 
+      <button
+        className="sidePanelToggle"
+        title={rightPanelOpen ? "Hide sidebar" : "Show sidebar"}
+        onClick={() => setRightPanelOpen((open) => !open)}
+      >
+        {rightPanelOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+      </button>
+
       <aside className="sidePanel">
         <div className="panelHeader">
-          <Archive size={18} />
-          <strong>Unsorted</strong>
+          {rightPanelMode === "trash" ? <Trash2 size={18} /> : rightPanelMode === "settings" ? <Settings size={18} /> : <Archive size={18} />}
+          <strong>{rightPanelMode === "trash" ? "Trash" : rightPanelMode === "settings" ? "Settings" : "Unsorted"}</strong>
         </div>
-        <p>Drop files or toolbar items anywhere on the canvas. Selected cards can be moved, resized, deleted, or opened.</p>
+        <div className="panelTabs">
+          <button className={rightPanelMode === "unsorted" ? "isSelected" : ""} onClick={() => setRightPanelMode("unsorted")}>
+            Unsorted
+          </button>
+          <button className={rightPanelMode === "trash" ? "isSelected" : ""} onClick={() => setRightPanelMode("trash")}>
+            Trash {trashCount}
+          </button>
+          <button className={rightPanelMode === "settings" ? "isSelected" : ""} onClick={() => setRightPanelMode("settings")}>
+            Settings
+          </button>
+        </div>
         {workspace.drawingSettings.enabled && (
           <div className="drawPanel">
             <div className="segmented">
@@ -846,6 +1359,70 @@ export function App() {
           <span>{workspace.boards.filter((board) => board.parentBoardId === currentBoard.id).length} boards</span>
           <span>{workspace.assets.length} assets</span>
         </div>
+        {rightPanelMode === "unsorted" && (
+          <>
+            <button className="secondaryAction" disabled={workspace.selectedCardIds.length === 0} onClick={sendSelectedToUnsorted}>
+              <Archive size={16} />
+              Send selected
+            </button>
+            <div className="stagingList">
+              {unsortedCards.length === 0 ? (
+                <span className="emptyHint">No staged entities</span>
+              ) : (
+                unsortedCards.map((card) => (
+                  <PanelCardRow key={card.id} card={card} onDragStart={handleUnsortedDrag} />
+                ))
+              )}
+            </div>
+          </>
+        )}
+        {rightPanelMode === "trash" && (
+          <div className="stagingList">
+            {trashedCards.length === 0 ? (
+              <span className="emptyHint">Trash is empty</span>
+            ) : (
+              trashedCards.map((card) => (
+                <PanelCardRow
+                  key={card.id}
+                  card={card}
+                  actionLabel="Restore"
+                  onAction={() => restoreCard(card.id)}
+                  dangerActionLabel="Delete"
+                  onDangerAction={() => deleteCardPermanently(card.id)}
+                />
+              ))
+            )}
+          </div>
+        )}
+        {rightPanelMode === "trash" && trashedCards.length > 0 && (
+          <button className="dangerAction" onClick={deleteAllTrash}>
+            <Trash2 size={16} />
+            Delete all
+          </button>
+        )}
+        {rightPanelMode === "settings" && (
+          <div className="settingsPanel">
+            <div className="settingsGroup">
+              <strong>Backup folder</strong>
+              <p>{backupDir ?? "No backup folder selected"}</p>
+              <button className="secondaryAction" onClick={chooseBackupFolder}>
+                Choose folder
+              </button>
+              <button className="secondaryAction" onClick={runBackupNow}>
+                Backup now
+              </button>
+              {settingsMessage && <span className="settingsNote">{settingsMessage}</span>}
+            </div>
+            <div className="settingsGroup">
+              <strong>Updates</strong>
+              <p>Desktop builds can check GitHub Releases and notify you when a new version is available.</p>
+              <button className="secondaryAction" onClick={checkForUpdates}>
+                Check updates
+              </button>
+              {updateMessage && <span className="settingsNote">{updateMessage}</span>}
+            </div>
+          </div>
+        )}
         <button className="primaryAction" onClick={() => createCard("note", 220, 220)}>
           <Plus size={16} />
           New note
@@ -867,8 +1444,13 @@ function CardView({
   onResize,
   onOpenBoard,
   onOpenPath,
+  onRevealPath,
   onPopOutFromColumn,
-  onChange
+  onColumnChildDrag,
+  onChange,
+  onUpdateCardContent,
+  noteSourceCollapsed,
+  onToggleNoteSource
 }: {
   card: CanvasCard;
   allCards: CanvasCard[];
@@ -877,8 +1459,13 @@ function CardView({
   onResize: (event: React.PointerEvent) => void;
   onOpenBoard: (boardId: string) => void;
   onOpenPath: (path: string) => void;
+  onRevealPath: (path: string) => void;
   onPopOutFromColumn: (cardId: string, columnId: string) => void;
+  onColumnChildDrag: (cardId: string, columnId: string, event: React.DragEvent) => void;
   onChange: (patch: Partial<CanvasCard["content"]>) => void;
+  onUpdateCardContent: (cardId: string, patch: Partial<CanvasCard["content"]>) => void;
+  noteSourceCollapsed: boolean;
+  onToggleNoteSource: () => void;
 }) {
   return (
     <section
@@ -888,15 +1475,9 @@ function CardView({
         top: card.y,
         width: card.width,
         height: card.height,
-        zIndex: card.zIndex,
-        background: card.style.background,
-        color: card.style.color,
-        borderColor: selected ? card.style.accent : undefined
+        zIndex: card.type === "line" ? 0 : card.zIndex
       }}
       onPointerDown={onPointerDown}
-      onDoubleClick={() => {
-        if (card.type === "board" && "boardId" in card.content) onOpenBoard(card.content.boardId);
-      }}
     >
       <button className="dragHandle" title="Move card" aria-label="Move card">
         <MousePointer2 size={13} />
@@ -907,7 +1488,12 @@ function CardView({
         onChange={onChange}
         onOpenBoard={onOpenBoard}
         onOpenPath={onOpenPath}
+        onRevealPath={onRevealPath}
         onPopOutFromColumn={onPopOutFromColumn}
+        onColumnChildDrag={onColumnChildDrag}
+        onUpdateCardContent={onUpdateCardContent}
+        noteSourceCollapsed={noteSourceCollapsed}
+        onToggleNoteSource={onToggleNoteSource}
       />
       <button className="resizeHandle" data-no-drag onPointerDown={onResize} aria-label="Resize" />
     </section>
@@ -920,19 +1506,39 @@ function CardContent({
   onChange,
   onOpenBoard,
   onOpenPath,
-  onPopOutFromColumn
+  onRevealPath,
+  onPopOutFromColumn,
+  onColumnChildDrag,
+  onUpdateCardContent,
+  noteSourceCollapsed,
+  onToggleNoteSource
 }: {
   card: CanvasCard;
   allCards: CanvasCard[];
   onChange: (patch: Partial<CanvasCard["content"]>) => void;
   onOpenBoard: (boardId: string) => void;
   onOpenPath: (path: string) => void;
+  onRevealPath: (path: string) => void;
   onPopOutFromColumn: (cardId: string, columnId: string) => void;
+  onColumnChildDrag: (cardId: string, columnId: string, event: React.DragEvent) => void;
+  onUpdateCardContent: (cardId: string, patch: Partial<CanvasCard["content"]>) => void;
+  noteSourceCollapsed: boolean;
+  onToggleNoteSource: () => void;
 }) {
   if (card.type === "note" && "text" in card.content) {
     const hasMarkdown = containsMarkdown(card.content.text);
     return (
-      <div className={`noteCard ${hasMarkdown ? "hasMarkdown" : "plainNote"}`}>
+      <div className={`noteCard ${hasMarkdown ? "hasMarkdown" : "plainNote"} ${noteSourceCollapsed ? "sourceCollapsed" : ""}`}>
+        {hasMarkdown && (
+          <button
+            data-no-drag
+            className="markdownToggle"
+            onClick={onToggleNoteSource}
+            title={noteSourceCollapsed ? "Show markdown source" : "Hide markdown source"}
+          >
+            {noteSourceCollapsed ? "Edit" : "Preview"}
+          </button>
+        )}
         <textarea
           data-no-drag
           className="noteEditor"
@@ -968,11 +1574,25 @@ function CardContent({
   }
 
   if ((card.type === "file" || card.type === "image") && "fileName" in card.content) {
+    const content = card.content;
     return (
       <div className="fileCard">
-        {card.content.thumbnailUrl ? <img src={card.content.thumbnailUrl} alt="" /> : <FileUp size={34} />}
-        <strong>{card.content.fileName}</strong>
-        <small>{formatBytes(card.content.size)} · {card.content.mimeType || "file"}</small>
+        {renderFilePreview(content)}
+        <strong>{content.fileName}</strong>
+        <small>{formatBytes(content.size)} · {content.mimeType || "file"}</small>
+        <div className="fileActions" data-no-drag>
+          {content.thumbnailUrl && (
+            <button onClick={() => window.open(content.thumbnailUrl, "_blank", "noopener,noreferrer")}>
+              Preview
+            </button>
+          )}
+          {content.sourcePath && (
+            <>
+              <button onClick={() => onOpenPath(content.sourcePath ?? "")}>Open source</button>
+              <button onClick={() => onRevealPath(content.sourcePath ?? "")}>Reveal</button>
+            </>
+          )}
+        </div>
       </div>
     );
   }
@@ -991,11 +1611,19 @@ function CardContent({
   if (card.type === "board" && "boardId" in card.content) {
     const content = card.content as BoardContent;
     return (
-      <button data-no-drag className="boardCardButton" onClick={() => onOpenBoard(content.boardId)}>
+      <div data-no-drag className="boardCardButton">
         <span className="boardIcon" style={{ background: content.color }}>{content.icon}</span>
-        <strong>{content.title}</strong>
-        <small>Open board</small>
-      </button>
+        <input
+          value={content.title}
+          onChange={(event) => onChange({ title: event.target.value })}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+          aria-label="Board title"
+        />
+        <button onClick={() => onOpenBoard(content.boardId)}>Open board</button>
+      </div>
     );
   }
 
@@ -1024,6 +1652,8 @@ function CardContent({
                   onOpenBoard={onOpenBoard}
                   onOpenPath={onOpenPath}
                   onPopOut={onPopOutFromColumn}
+                  onDragStart={onColumnChildDrag}
+                  onUpdateCardContent={onUpdateCardContent}
                 />
               ))
           )}
@@ -1046,27 +1676,60 @@ function CardContent({
     const content = card.content as TodoContent;
     return (
       <div className="todoCard">
-        <strong>{content.title}</strong>
-        {content.items.map((item) => (
-          <label key={item.id} data-no-drag>
-            <input
-              type="checkbox"
-              checked={item.done}
-              onChange={() =>
-                onChange({
-                  items: content.items.map((candidate) =>
-                    candidate.id === item.id ? { ...candidate, done: !candidate.done } : candidate
-                  )
-                })
-              }
-            />
-            <span>{item.text}</span>
-          </label>
-        ))}
+        <input
+          data-no-drag
+          className="todoTitleInput"
+          value={content.title}
+          onChange={(event) => onChange({ title: event.target.value })}
+          aria-label="Todo title"
+        />
+        <div className="todoItems">
+          {content.items.map((item) => (
+            <div key={item.id} className="todoItem" data-no-drag>
+              <input
+                type="checkbox"
+                checked={item.done}
+                onChange={() =>
+                  onChange({
+                    items: content.items.map((candidate) =>
+                      candidate.id === item.id ? { ...candidate, done: !candidate.done } : candidate
+                    )
+                  })
+                }
+                aria-label={`Toggle ${item.text || "task"}`}
+              />
+              <input
+                className="todoTextInput"
+                value={item.text}
+                onChange={(event) =>
+                  onChange({
+                    items: content.items.map((candidate) =>
+                      candidate.id === item.id ? { ...candidate, text: event.target.value } : candidate
+                    )
+                  })
+                }
+                aria-label="Todo item"
+              />
+              <button
+                className="todoDelete"
+                onClick={() => onChange({ items: content.items.filter((candidate) => candidate.id !== item.id) })}
+                aria-label="Delete todo item"
+              >
+                x
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          data-no-drag
+          className="todoAdd"
+          onClick={() => onChange({ items: [...content.items, { id: createId("todo"), text: "New task", done: false }] })}
+        >
+          Add task
+        </button>
       </div>
     );
   }
-
   if (card.type === "line" && "points" in card.content) {
     return (
       <svg className="lineCard" viewBox={`0 0 ${card.width} ${card.height}`}>
@@ -1112,21 +1775,32 @@ function ColumnChild({
   columnId,
   onOpenBoard,
   onOpenPath,
-  onPopOut
+  onPopOut,
+  onDragStart,
+  onUpdateCardContent
 }: {
   card: CanvasCard;
   columnId: string;
   onOpenBoard: (boardId: string) => void;
   onOpenPath: (path: string) => void;
   onPopOut: (cardId: string, columnId: string) => void;
+  onDragStart: (cardId: string, columnId: string, event: React.DragEvent) => void;
+  onUpdateCardContent: (cardId: string, patch: Partial<CanvasCard["content"]>) => void;
 }) {
   const label = getCardLabel(card);
   const accent = card.style.accent ?? "#6fc7e8";
   if (card.type === "board" && "boardId" in card.content) {
     const content = card.content as BoardContent;
     return (
-      <button data-no-drag className="columnChild" onClick={() => onOpenBoard(content.boardId)} title="Open board">
-        <span style={{ background: content.color }} />
+      <button
+        data-no-drag
+        draggable
+        className="columnChild"
+        onDragStart={(event) => onDragStart(card.id, columnId, event)}
+        onClick={() => onOpenBoard(content.boardId)}
+        title="Open board"
+      >
+        <span className="columnChildAccent" style={{ background: content.color }} />
         <strong>{label}</strong>
         <small>Board</small>
         <CornerUpRight size={15} />
@@ -1137,8 +1811,15 @@ function ColumnChild({
   if (card.type === "link" && "url" in card.content) {
     const content = card.content as LinkContent;
     return (
-      <button data-no-drag className="columnChild" onClick={() => window.open(content.url, "_blank", "noopener,noreferrer")} title="Open link">
-        <span style={{ background: accent }} />
+      <button
+        data-no-drag
+        draggable
+        className="columnChild"
+        onDragStart={(event) => onDragStart(card.id, columnId, event)}
+        onClick={() => window.open(content.url, "_blank", "noopener,noreferrer")}
+        title="Open link"
+      >
+        <span className="columnChildAccent" style={{ background: accent }} />
         <strong>{label}</strong>
         <small>Link</small>
         <CornerUpRight size={15} />
@@ -1149,8 +1830,15 @@ function ColumnChild({
   if (card.type === "folder" && "path" in card.content) {
     const content = card.content as FolderContent;
     return (
-      <button data-no-drag className="columnChild" onClick={() => onOpenPath(content.path)} title="Open folder">
-        <span style={{ background: accent }} />
+      <button
+        data-no-drag
+        draggable
+        className="columnChild"
+        onDragStart={(event) => onDragStart(card.id, columnId, event)}
+        onClick={() => onOpenPath(content.path)}
+        title="Open folder"
+      >
+        <span className="columnChildAccent" style={{ background: accent }} />
         <strong>{label}</strong>
         <small>Folder</small>
         <CornerUpRight size={15} />
@@ -1158,14 +1846,191 @@ function ColumnChild({
     );
   }
 
+  if (card.type === "note" && "text" in card.content) {
+    return (
+      <div data-no-drag draggable className="columnEmbedded columnEmbedded-note" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <span className="columnChildAccent" style={{ background: accent }} />
+        <textarea value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
+      </div>
+    );
+  }
+
+  if (card.type === "title" && "text" in card.content) {
+    return (
+      <div data-no-drag draggable className="columnEmbedded columnEmbedded-title" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <span className="columnChildAccent" style={{ background: accent }} />
+        <input value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
+      </div>
+    );
+  }
+
+  if (card.type === "comment" && "text" in card.content) {
+    return (
+      <div data-no-drag draggable className="columnEmbedded columnEmbedded-comment" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <span className="columnChildAccent" style={{ background: accent }} />
+        <textarea value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
+      </div>
+    );
+  }
+
+  if (card.type === "todo" && "items" in card.content) {
+    const content = card.content as TodoContent;
+    return (
+      <div data-no-drag draggable className="columnEmbedded columnEmbedded-todo" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <span className="columnChildAccent" style={{ background: accent }} />
+        <input
+          className="todoTitleInput"
+          value={content.title}
+          onChange={(event) => onUpdateCardContent(card.id, { title: event.target.value })}
+          aria-label="Todo title"
+        />
+        {content.items.map((item) => (
+          <div key={item.id} className="todoItem">
+            <input
+              type="checkbox"
+              checked={item.done}
+              onChange={() =>
+                onUpdateCardContent(card.id, {
+                  items: content.items.map((candidate) =>
+                    candidate.id === item.id ? { ...candidate, done: !candidate.done } : candidate
+                  )
+                })
+              }
+              aria-label={`Toggle ${item.text || "task"}`}
+            />
+            <input
+              className="todoTextInput"
+              value={item.text}
+              onChange={(event) =>
+                onUpdateCardContent(card.id, {
+                  items: content.items.map((candidate) =>
+                    candidate.id === item.id ? { ...candidate, text: event.target.value } : candidate
+                  )
+                })
+              }
+              aria-label="Todo item"
+            />
+            <button
+              className="todoDelete"
+              onClick={() => onUpdateCardContent(card.id, { items: content.items.filter((candidate) => candidate.id !== item.id) })}
+              aria-label="Delete todo item"
+            >
+              x
+            </button>
+          </div>
+        ))}
+        <button
+          className="todoAdd"
+          onClick={() => onUpdateCardContent(card.id, { items: [...content.items, { id: createId("todo"), text: "New task", done: false }] })}
+        >
+          Add task
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <button data-no-drag className="columnChild" onClick={() => onPopOut(card.id, columnId)} title="Pop out to canvas">
-      <span style={{ background: accent }} />
+    <button
+      data-no-drag
+      draggable
+      className="columnChild"
+      onDragStart={(event) => onDragStart(card.id, columnId, event)}
+      onClick={() => onPopOut(card.id, columnId)}
+      title="Pop out to canvas"
+    >
+      <span className="columnChildAccent" style={{ background: accent }} />
       <strong>{label}</strong>
       <small>{card.type}</small>
       <CornerUpRight size={15} />
     </button>
   );
+}
+
+function PanelCardRow({
+  card,
+  actionLabel,
+  onAction,
+  dangerActionLabel,
+  onDangerAction,
+  onDragStart
+}: {
+  card: CanvasCard;
+  actionLabel?: string;
+  onAction?: () => void;
+  dangerActionLabel?: string;
+  onDangerAction?: () => void;
+  onDragStart?: (cardId: string, event: React.DragEvent) => void;
+}) {
+  return (
+    <div
+      className="panelCardRow"
+      draggable={Boolean(onDragStart)}
+      onDragStart={(event) => onDragStart?.(card.id, event)}
+    >
+      <span style={{ background: card.style.accent ?? "#6fc7e8" }} />
+      <strong>{getCardLabel(card)}</strong>
+      {onAction ? <button onClick={onAction}>{actionLabel}</button> : <small>{card.type}</small>}
+      {onDangerAction && (
+        <button className="dangerInline" onClick={onDangerAction}>
+          {dangerActionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function clampZoom(value: number) {
+  return Number(Math.min(maxZoom, Math.max(minZoom, value)).toFixed(2));
+}
+
+function purgeCardsFromDraft(draft: WorkspaceState, rootCardIds: string[]) {
+  const boardIdsToDelete = new Set<string>();
+  const cardIdsToDelete = new Set<string>(rootCardIds);
+
+  rootCardIds.forEach((cardId) => {
+    const rootCard = draft.cards.find((card) => card.id === cardId);
+    if (rootCard?.type === "board" && "boardId" in rootCard.content) {
+      collectBoardSubtreeIds(rootCard.content.boardId, draft.boards, boardIdsToDelete);
+    }
+  });
+
+  draft.cards.forEach((card) => {
+    if (boardIdsToDelete.has(card.boardId)) {
+      cardIdsToDelete.add(card.id);
+    }
+  });
+
+  draft.boards = draft.boards.filter((board) => !boardIdsToDelete.has(board.id));
+  draft.cards = draft.cards.filter((card) => {
+    if (cardIdsToDelete.has(card.id)) return false;
+    if (card.type === "line" && "sourceCardId" in card.content) {
+      const content = card.content as LineContent;
+      return !(
+        (content.sourceCardId && cardIdsToDelete.has(content.sourceCardId)) ||
+        (content.targetCardId && cardIdsToDelete.has(content.targetCardId))
+      );
+    }
+    return true;
+  });
+  draft.cards.forEach((card) => {
+    if (card.type === "column" && "childCardIds" in card.content) {
+      const content = card.content as ColumnContent;
+      content.childCardIds = content.childCardIds.filter((id) => !cardIdsToDelete.has(id));
+    }
+  });
+  draft.unsortedCardIds = draft.unsortedCardIds.filter((id) => !cardIdsToDelete.has(id));
+  draft.selectedCardIds = draft.selectedCardIds.filter((id) => !cardIdsToDelete.has(id));
+  if (boardIdsToDelete.has(draft.currentBoardId)) {
+    draft.currentBoardId = "board_home";
+  }
+  return draft;
+}
+
+function collectBoardSubtreeIds(rootBoardId: string, boards: Board[], output: Set<string>) {
+  output.add(rootBoardId);
+  boards
+    .filter((board) => board.parentBoardId === rootBoardId)
+    .forEach((board) => collectBoardSubtreeIds(board.id, boards, output));
 }
 
 function getCardLabel(card: CanvasCard) {
@@ -1186,6 +2051,24 @@ function getCardLabel(card: CanvasCard) {
   if (card.type === "todo" && "title" in card.content) return card.content.title;
   if (card.type === "comment" && "text" in card.content) return card.content.text || "Comment";
   return card.type;
+}
+
+function renderFilePreview(content: { thumbnailUrl?: string; mimeType: string; fileName: string }) {
+  if (content.thumbnailUrl && content.mimeType.startsWith("image/")) {
+    return <img src={content.thumbnailUrl} alt="" />;
+  }
+  if (content.thumbnailUrl && content.mimeType.startsWith("video/")) {
+    return <video src={content.thumbnailUrl} controls />;
+  }
+  if (content.thumbnailUrl && content.mimeType.startsWith("audio/")) {
+    return (
+      <div className="audioPreview">
+        <FileUp size={30} />
+        <audio src={content.thumbnailUrl} controls />
+      </div>
+    );
+  }
+  return <FileUp size={34} />;
 }
 
 function renderMarkdown(text: string) {
@@ -1282,6 +2165,64 @@ function findColumnDropTarget(cards: CanvasCard[], dragged: CanvasCard, point: {
     .filter((card) => card.id !== dragged.id && card.boardId === dragged.boardId && card.type === "column" && !card.trashedAt)
     .filter((card) => point.x >= card.x && point.x <= card.x + card.width && point.y >= card.y && point.y <= card.y + card.height)
     .sort((a, b) => b.zIndex - a.zIndex)[0];
+}
+
+function resolveDroppedFileType(file: File): CardType {
+  if (file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/")) {
+    return "image";
+  }
+  return "file";
+}
+
+function expandCutCardIds(selectedCardIds: string[], cards: CanvasCard[]) {
+  const ids = new Set(selectedCardIds);
+  const visitColumn = (cardId: string) => {
+    const card = cards.find((candidate) => candidate.id === cardId);
+    if (!card || card.type !== "column" || !("childCardIds" in card.content)) return;
+    const content = card.content as ColumnContent;
+    content.childCardIds.forEach((childId) => {
+      if (ids.has(childId)) return;
+      ids.add(childId);
+      visitColumn(childId);
+    });
+  };
+  selectedCardIds.forEach(visitColumn);
+  cards.forEach((card) => {
+    if (card.type !== "line" || !("sourceCardId" in card.content)) return;
+    const content = card.content as LineContent;
+    if (content.sourceCardId && content.targetCardId && ids.has(content.sourceCardId) && ids.has(content.targetCardId)) {
+      ids.add(card.id);
+    }
+  });
+  return Array.from(ids);
+}
+
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function getDroppedFilePath(file?: File) {
+  if (!file) return undefined;
+  const maybePath = (file as File & { path?: string }).path;
+  return maybePath || undefined;
+}
+
+function isEditableElement(element: Element | null) {
+  if (!element) return false;
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return true;
+  return element instanceof HTMLElement && element.isContentEditable;
+}
+
+function extractSingleUrl(text: string) {
+  const value = text.trim();
+  if (!value || /\s/.test(value)) return null;
+  try {
+    const url = normalizeUrl(value);
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
 }
 
 function getColumnChildIds(cards: CanvasCard[], boardId: string) {

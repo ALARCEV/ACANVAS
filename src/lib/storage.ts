@@ -16,6 +16,7 @@ export function createInitialWorkspace(): WorkspaceState {
       color: "#f0b86e",
       width: 5
     },
+    unsortedCardIds: [],
     currentBoardId: "board_home",
     selectedCardIds: [],
     zoom: 1,
@@ -37,6 +38,7 @@ export function loadWorkspace(): WorkspaceState {
       ...parsed,
       drawingStrokes: parsed.drawingStrokes ?? [],
       drawingSettings: parsed.drawingSettings ?? createInitialWorkspace().drawingSettings,
+      unsortedCardIds: parsed.unsortedCardIds ?? [],
       selectedCardIds: [],
       history: [],
       future: []

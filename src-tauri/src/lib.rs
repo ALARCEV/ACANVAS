@@ -24,6 +24,21 @@ fn export_workspace(store: State<'_, AppStore>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_backup_dir(store: State<'_, AppStore>) -> Result<Option<String>, String> {
+    store.get_backup_dir().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_backup_dir(store: State<'_, AppStore>, path: String) -> Result<(), String> {
+    store.set_backup_dir(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn backup_now(store: State<'_, AppStore>) -> Result<Option<String>, String> {
+    store.sync_backup().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let target = std::path::PathBuf::from(path);
     if !target.exists() {
@@ -46,11 +61,35 @@ fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    let target = std::path::PathBuf::from(path);
+    if !target.exists() {
+        return Err("Path does not exist".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", target.to_string_lossy()))
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err("Revealing local paths is currently implemented for Windows only".to_string());
+    }
+
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_dir = app
                 .path()
@@ -65,7 +104,11 @@ pub fn run() {
             save_workspace,
             fetch_link_preview,
             export_workspace,
-            open_path
+            get_backup_dir,
+            set_backup_dir,
+            backup_now,
+            open_path,
+            reveal_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running ACANVAS");

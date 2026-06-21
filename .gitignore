@@ -8,3 +8,5 @@ acanvas-screenshot.png
 dev-server*.log
 test-results/
 playwright-report/
+.tauri-updater-private.key
+.tauri-updater-private.key.pub

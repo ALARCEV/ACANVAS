@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct AppStore {
@@ -48,6 +48,8 @@ impl AppStore {
             "insert into workspace_snapshots (id, payload, created_at) values (?1, ?2, datetime('now'))",
             params![uuid::Uuid::new_v4().to_string(), workspace.to_string()],
         )?;
+        drop(db);
+        self.sync_backup().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 
@@ -61,6 +63,55 @@ impl AppStore {
             .unwrap_or_else(|_| json!({ "schema": "acanvas.workspace.v1" }));
         std::fs::write(&export_path, serde_json::to_string_pretty(&payload).unwrap_or_default())?;
         Ok(export_path.to_string_lossy().to_string())
+    }
+
+    pub fn get_backup_dir(&self) -> rusqlite::Result<Option<String>> {
+        let db = self.db.lock().expect("database lock poisoned");
+        let result = db.query_row(
+            "select value from settings where key = 'backup_dir'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn set_backup_dir(&self, path: String) -> rusqlite::Result<()> {
+        let backup_dir = PathBuf::from(path.trim());
+        if !backup_dir.exists() {
+            std::fs::create_dir_all(&backup_dir)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        }
+        if !backup_dir.is_dir() {
+            return Err(rusqlite::Error::InvalidPath(backup_dir));
+        }
+        let db = self.db.lock().expect("database lock poisoned");
+        db.execute(
+            "insert into settings (key, value) values ('backup_dir', ?1)
+             on conflict(key) do update set value = excluded.value",
+            params![backup_dir.to_string_lossy().to_string()],
+        )?;
+        drop(db);
+        self.sync_backup().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        Ok(())
+    }
+
+    pub fn sync_backup(&self) -> std::io::Result<Option<String>> {
+        let backup_dir = match self.get_backup_dir().map_err(to_io_error)? {
+            Some(value) => PathBuf::from(value),
+            None => return Ok(None),
+        };
+        std::fs::create_dir_all(&backup_dir)?;
+        let payload = self
+            .load_workspace()
+            .unwrap_or_else(|_| json!({ "schema": "acanvas.workspace.v1" }));
+        let workspace_path = backup_dir.join("acanvas-workspace.json");
+        std::fs::write(&workspace_path, serde_json::to_string_pretty(&payload).unwrap_or_default())?;
+        sync_asset_backup(&backup_dir, &payload)?;
+        Ok(Some(workspace_path.to_string_lossy().to_string()))
     }
 }
 
@@ -119,10 +170,67 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             primary key (column_card_id, card_id)
         );
 
+        create table if not exists settings (
+            key text primary key,
+            value text not null
+        );
+
         create index if not exists idx_cards_board_id on cards(board_id);
         create index if not exists idx_boards_parent on boards(parent_board_id);
         ",
     )
+}
+
+fn sync_asset_backup(backup_dir: &Path, payload: &serde_json::Value) -> std::io::Result<()> {
+    let assets_dir = backup_dir.join("assets");
+    if assets_dir.exists() {
+        std::fs::remove_dir_all(&assets_dir)?;
+    }
+    std::fs::create_dir_all(&assets_dir)?;
+    let Some(assets) = payload.get("assets").and_then(|value| value.as_array()) else {
+        return Ok(());
+    };
+    for asset in assets {
+        let source_path = asset
+            .get("sourcePath")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty());
+        let Some(source_path) = source_path else {
+            continue;
+        };
+        let source = PathBuf::from(source_path);
+        if !source.is_file() {
+            continue;
+        }
+        let original_name = asset
+            .get("originalName")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| Path::new(value).file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or("asset");
+        let asset_id = asset
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("asset");
+        let destination = assets_dir.join(format!("{}-{}", sanitize_file_name(asset_id), sanitize_file_name(original_name)));
+        std::fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn to_io_error(error: rusqlite::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
 }
 
 pub fn fetch_link_preview(url: &str) -> Result<LinkPreview, Box<dyn std::error::Error>> {

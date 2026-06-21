@@ -47,3 +47,55 @@ export async function openPathWithBackend(path: string) {
   }
   await invoke("open_path", { path });
 }
+
+export async function revealPathWithBackend(path: string) {
+  const invoke = await getInvoke();
+  if (!invoke) {
+    throw new Error("Revealing Windows paths is available in the ACANVAS desktop app.");
+  }
+  await invoke("reveal_path", { path });
+}
+
+export async function getBackupDirFromBackend(): Promise<string | null> {
+  const invoke = await getInvoke();
+  if (!invoke) return null;
+  return invoke<string | null>("get_backup_dir");
+}
+
+export async function setBackupDirInBackend(path: string) {
+  const invoke = await getInvoke();
+  if (!invoke) {
+    throw new Error("Backup folder selection is available in the ACANVAS desktop app.");
+  }
+  await invoke("set_backup_dir", { path });
+}
+
+export async function backupNowWithBackend(): Promise<string | null> {
+  const invoke = await getInvoke();
+  if (!invoke) {
+    throw new Error("Desktop backup is available in the ACANVAS desktop app.");
+  }
+  return invoke<string | null>("backup_now");
+}
+
+export async function selectBackupDirWithDialog(): Promise<string | null> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    throw new Error("Windows folder picker is available in the ACANVAS desktop app.");
+  }
+  const dialog = await import("@tauri-apps/plugin-dialog");
+  const selected = await dialog.open({
+    directory: true,
+    multiple: false,
+    title: "Choose ACANVAS backup folder"
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function checkForDesktopUpdate(): Promise<"available" | "not-available"> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    throw new Error("Update checks are available in the ACANVAS desktop app.");
+  }
+  const updater = await import("@tauri-apps/plugin-updater");
+  const update = await updater.check();
+  return update ? "available" : "not-available";
+}

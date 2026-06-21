@@ -78,6 +78,7 @@ export interface FileContent {
   mimeType: string;
   size: number;
   thumbnailUrl?: string;
+  sourcePath?: string;
 }
 
 export interface BoardContent {
@@ -147,6 +148,7 @@ export interface Asset {
   relativePath?: string;
   thumbnailPath?: string;
   objectUrl?: string;
+  sourcePath?: string;
   createdAt: string;
 }
 
@@ -156,6 +158,7 @@ export interface WorkspaceState {
   assets: Asset[];
   drawingStrokes: DrawStroke[];
   drawingSettings: DrawingSettings;
+  unsortedCardIds: string[];
   currentBoardId: string;
   selectedCardIds: string[];
   zoom: number;
