@@ -115,7 +115,8 @@ export function App() {
   const boardRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceRef = useRef(workspace);
-  const dragOffset = useRef({ x: 0, y: 0 });
+  const dragStartPoint = useRef({ x: 0, y: 0 });
+  const dragStartCards = useRef<Array<{ id: string; x: number; y: number }>>([]);
   const lastPointerPoint = useRef({ x: 0, y: 0 });
   const lastCanvasClientPoint = useRef({ x: 360, y: 260 });
   const panStart = useRef({ clientX: 0, clientY: 0, x: 0, y: 0 });
@@ -805,6 +806,26 @@ export function App() {
     event.dataTransfer.effectAllowed = "move";
   }
 
+  function handleColumnChildPointerExtract(cardId: string, columnId: string, event: React.PointerEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const finish = (upEvent: PointerEvent) => {
+      target.releasePointerCapture(event.pointerId);
+      target.removeEventListener("pointerup", finish);
+      target.removeEventListener("pointercancel", cancel);
+      const point = canvasPoint(upEvent.clientX, upEvent.clientY);
+      moveCardOutOfColumn(cardId, columnId, point);
+    };
+    const cancel = () => {
+      target.removeEventListener("pointerup", finish);
+      target.removeEventListener("pointercancel", cancel);
+    };
+    target.addEventListener("pointerup", finish);
+    target.addEventListener("pointercancel", cancel);
+  }
+
   function handleUnsortedDrag(cardId: string, event: React.DragEvent) {
     event.dataTransfer.setData("application/acanvas-unsorted-card", JSON.stringify({ cardId }));
     event.dataTransfer.effectAllowed = "move";
@@ -842,16 +863,28 @@ export function App() {
     if (spacePressed) return;
     if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
     const point = canvasPoint(event.clientX, event.clientY);
-    dragOffset.current = { x: point.x - card.x, y: point.y - card.y };
+    dragStartPoint.current = point;
+    const alreadySelected = workspace.selectedCardIds.includes(card.id);
+    const nextSelectedIds = event.shiftKey
+      ? Array.from(new Set([...workspace.selectedCardIds, card.id]))
+      : alreadySelected
+        ? workspace.selectedCardIds
+        : [card.id];
+    dragStartCards.current = workspace.cards
+      .filter((item) => nextSelectedIds.includes(item.id) && item.type !== "line")
+      .map((item) => ({ id: item.id, x: item.x, y: item.y }));
     setDraggingCard(card.id);
     event.currentTarget.setPointerCapture(event.pointerId);
     update((draft) => {
-      draft.selectedCardIds = event.shiftKey
-        ? Array.from(new Set([...draft.selectedCardIds, card.id]))
-        : [card.id];
+      draft.selectedCardIds = nextSelectedIds;
       const maxZ = Math.max(0, ...draft.cards.map((item) => item.zIndex));
-      const target = draft.cards.find((item) => item.id === card.id);
-      if (target && target.type !== "line") target.zIndex = maxZ + 1;
+      let zOffset = 1;
+      draft.cards.forEach((item) => {
+        if (nextSelectedIds.includes(item.id) && item.type !== "line") {
+          item.zIndex = maxZ + zOffset;
+          zOffset += 1;
+        }
+      });
       return draft;
     }, false);
   }
@@ -890,14 +923,23 @@ export function App() {
       const target = draft.cards.find((card) => card.id === (draggingCard ?? resizingCard));
       if (!target) return draft;
       if (draggingCard) {
-        target.x = Math.round(point.x - dragOffset.current.x);
-        target.y = Math.round(point.y - dragOffset.current.y);
+        const dx = Math.round(point.x - dragStartPoint.current.x);
+        const dy = Math.round(point.y - dragStartPoint.current.y);
+        const dragIds = new Set(dragStartCards.current.map((item) => item.id));
+        draft.cards.forEach((card) => {
+          if (!dragIds.has(card.id)) return;
+          const start = dragStartCards.current.find((item) => item.id === card.id);
+          if (!start) return;
+          card.x = start.x + dx;
+          card.y = start.y + dy;
+          card.updatedAt = nowIso();
+        });
       }
       if (resizingCard) {
         target.width = Math.max(140, Math.round(point.x - target.x));
         target.height = Math.max(90, Math.round(point.y - target.y));
+        target.updatedAt = nowIso();
       }
-      target.updatedAt = nowIso();
       return draft;
     }, false);
   }
@@ -917,12 +959,14 @@ export function App() {
     }
     if (!draggingCard && !resizingCard) return;
     const droppedCardId = draggingCard;
+    const wasGroupDrag = dragStartCards.current.length > 1;
+    dragStartCards.current = [];
     setDraggingCard(null);
     setResizingCard(null);
     setWorkspace((current) => {
       let cards = current.cards;
       let boards = current.boards;
-      if (droppedCardId) {
+      if (droppedCardId && !wasGroupDrag) {
         const dragged = cards.find((card) => card.id === droppedCardId);
         const targetColumnCard = dragged ? findColumnDropTarget(cards, dragged, lastPointerPoint.current) : undefined;
         if (dragged && targetColumnCard && "childCardIds" in targetColumnCard.content) {
@@ -1441,6 +1485,7 @@ export function App() {
               onRevealPath={revealFolderPath}
               onPopOutFromColumn={popOutFromColumn}
               onColumnChildDrag={handleColumnChildDrag}
+              onColumnChildPointerExtract={handleColumnChildPointerExtract}
               onChange={(patch) => updateCardContent(card.id, patch)}
               onUpdateCardContent={updateCardContent}
               noteSourceCollapsed={collapsedMarkdownIds.includes(card.id)}
@@ -1618,6 +1663,7 @@ function CardView({
   onRevealPath,
   onPopOutFromColumn,
   onColumnChildDrag,
+  onColumnChildPointerExtract,
   onChange,
   onUpdateCardContent,
   noteSourceCollapsed,
@@ -1633,6 +1679,7 @@ function CardView({
   onRevealPath: (path: string) => void;
   onPopOutFromColumn: (cardId: string, columnId: string) => void;
   onColumnChildDrag: (cardId: string, columnId: string, event: React.DragEvent) => void;
+  onColumnChildPointerExtract: (cardId: string, columnId: string, event: React.PointerEvent<HTMLElement>) => void;
   onChange: (patch: Partial<CanvasCard["content"]>) => void;
   onUpdateCardContent: (cardId: string, patch: Partial<CanvasCard["content"]>) => void;
   noteSourceCollapsed: boolean;
@@ -1662,6 +1709,7 @@ function CardView({
         onRevealPath={onRevealPath}
         onPopOutFromColumn={onPopOutFromColumn}
         onColumnChildDrag={onColumnChildDrag}
+        onColumnChildPointerExtract={onColumnChildPointerExtract}
         onUpdateCardContent={onUpdateCardContent}
         noteSourceCollapsed={noteSourceCollapsed}
         onToggleNoteSource={onToggleNoteSource}
@@ -1680,6 +1728,7 @@ function CardContent({
   onRevealPath,
   onPopOutFromColumn,
   onColumnChildDrag,
+  onColumnChildPointerExtract,
   onUpdateCardContent,
   noteSourceCollapsed,
   onToggleNoteSource
@@ -1692,6 +1741,7 @@ function CardContent({
   onRevealPath: (path: string) => void;
   onPopOutFromColumn: (cardId: string, columnId: string) => void;
   onColumnChildDrag: (cardId: string, columnId: string, event: React.DragEvent) => void;
+  onColumnChildPointerExtract: (cardId: string, columnId: string, event: React.PointerEvent<HTMLElement>) => void;
   onUpdateCardContent: (cardId: string, patch: Partial<CanvasCard["content"]>) => void;
   noteSourceCollapsed: boolean;
   onToggleNoteSource: () => void;
@@ -1854,6 +1904,7 @@ function CardContent({
                   onOpenPath={onOpenPath}
                   onPopOut={onPopOutFromColumn}
                   onDragStart={onColumnChildDrag}
+                  onPointerExtract={onColumnChildPointerExtract}
                   onUpdateCardContent={onUpdateCardContent}
                 />
               ))
@@ -1978,6 +2029,7 @@ function ColumnChild({
   onOpenPath,
   onPopOut,
   onDragStart,
+  onPointerExtract,
   onUpdateCardContent
 }: {
   card: CanvasCard;
@@ -1986,6 +2038,7 @@ function ColumnChild({
   onOpenPath: (path: string) => void;
   onPopOut: (cardId: string, columnId: string) => void;
   onDragStart: (cardId: string, columnId: string, event: React.DragEvent) => void;
+  onPointerExtract: (cardId: string, columnId: string, event: React.PointerEvent<HTMLElement>) => void;
   onUpdateCardContent: (cardId: string, patch: Partial<CanvasCard["content"]>) => void;
 }) {
   const label = getCardLabel(card);
@@ -2004,7 +2057,7 @@ function ColumnChild({
         <span className="columnChildAccent" style={{ background: content.color }} />
         <strong>{label}</strong>
         <small>Board</small>
-        <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
       </div>
@@ -2025,7 +2078,7 @@ function ColumnChild({
         <span className="columnChildAccent" style={{ background: accent }} />
         <strong>{label}</strong>
         <small>Link</small>
-        <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
       </div>
@@ -2046,7 +2099,7 @@ function ColumnChild({
         <span className="columnChildAccent" style={{ background: accent }} />
         <strong>{label}</strong>
         <small>Folder</small>
-        <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
       </div>
@@ -2057,7 +2110,7 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-note" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
-        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
         <textarea value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
@@ -2069,7 +2122,7 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-title" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
-        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
         <input value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
@@ -2081,7 +2134,7 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-comment" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
-        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
         <textarea value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
@@ -2094,7 +2147,7 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-todo" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
-        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
           <CornerUpRight size={15} />
         </button>
         <input
@@ -2160,7 +2213,7 @@ function ColumnChild({
       <span className="columnChildAccent" style={{ background: accent }} />
       <strong>{label}</strong>
       <small>{card.type}</small>
-      <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+      <button className="columnChildDrag" draggable onPointerDown={(event) => onPointerExtract(card.id, columnId, event)} onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <CornerUpRight size={15} />
       </button>
     </div>
