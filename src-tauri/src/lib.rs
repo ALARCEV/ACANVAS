@@ -3,6 +3,12 @@ mod storage;
 use storage::{AppStore, LinkPreview};
 use tauri::{Manager, State};
 
+#[derive(serde::Serialize)]
+struct PathMetadata {
+    size: u64,
+    is_dir: bool,
+}
+
 #[tauri::command]
 fn load_workspace(store: State<'_, AppStore>) -> Result<serde_json::Value, String> {
     store.load_workspace().map_err(|error| error.to_string())
@@ -39,6 +45,16 @@ fn backup_now(store: State<'_, AppStore>) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn path_metadata(path: String) -> Result<PathMetadata, String> {
+    let target = std::path::PathBuf::from(path);
+    let metadata = std::fs::metadata(target).map_err(|error| error.to_string())?;
+    Ok(PathMetadata {
+        size: metadata.len(),
+        is_dir: metadata.is_dir(),
+    })
+}
+
+#[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let target = std::path::PathBuf::from(path);
     if !target.exists() {
@@ -47,10 +63,7 @@ fn open_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(target)
-            .spawn()
-            .map_err(|error| error.to_string())?;
+        open::that_detached(target).map_err(|error| error.to_string())?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -70,8 +83,9 @@ fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", target.to_string_lossy()))
+        std::process::Command::new("explorer.exe")
+            .arg("/select,")
+            .arg(target.as_os_str())
             .spawn()
             .map_err(|error| error.to_string())?;
     }
@@ -107,6 +121,7 @@ pub fn run() {
             get_backup_dir,
             set_backup_dir,
             backup_now,
+            path_metadata,
             open_path,
             reveal_path
         ])

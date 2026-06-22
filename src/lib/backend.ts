@@ -56,6 +56,16 @@ export async function revealPathWithBackend(path: string) {
   await invoke("reveal_path", { path });
 }
 
+export async function getPathMetadata(path: string): Promise<{ size: number; isDir: boolean } | null> {
+  const invoke = await getInvoke();
+  if (!invoke) return null;
+  const metadata = await invoke<{ size: number; is_dir: boolean }>("path_metadata", { path });
+  return {
+    size: Number(metadata.size),
+    isDir: metadata.is_dir
+  };
+}
+
 export async function getBackupDirFromBackend(): Promise<string | null> {
   const invoke = await getInvoke();
   if (!invoke) return null;
@@ -68,6 +78,26 @@ export async function setBackupDirInBackend(path: string) {
     throw new Error("Backup folder selection is available in the ACANVAS desktop app.");
   }
   await invoke("set_backup_dir", { path });
+}
+
+export async function selectFilesWithDialog(): Promise<string[] | null> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return null;
+  }
+  const dialog = await import("@tauri-apps/plugin-dialog");
+  const selected = await dialog.open({
+    directory: false,
+    multiple: true,
+    title: "Choose files for ACANVAS"
+  });
+  if (!selected) return [];
+  return Array.isArray(selected) ? selected : [selected];
+}
+
+export async function toAssetUrl(path: string): Promise<string | null> {
+  if (!("__TAURI_INTERNALS__" in window)) return null;
+  const api = await import("@tauri-apps/api/core");
+  return api.convertFileSrc(path);
 }
 
 export async function backupNowWithBackend(): Promise<string | null> {

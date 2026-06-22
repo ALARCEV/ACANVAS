@@ -332,8 +332,8 @@ button {
 
 .resizeHandle {
   position: absolute;
-  right: 5px;
-  bottom: 5px;
+  right: 14px;
+  bottom: 14px;
   width: 13px;
   height: 13px;
   border-radius: 4px;
@@ -387,7 +387,7 @@ button {
 .markdownToggle {
   position: absolute;
   top: 8px;
-  right: 8px;
+  right: 28px;
   z-index: 2;
   height: 24px;
   padding: 0 8px;
@@ -522,6 +522,8 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding-right: 22px;
+  padding-bottom: 6px;
   margin-top: auto;
 }
 
@@ -533,6 +535,13 @@ button {
   background: #111111;
   color: #dddddd;
   cursor: pointer;
+}
+
+.filePathHint {
+  max-width: 100%;
+  color: #858585;
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 .folderCard {
@@ -567,6 +576,15 @@ button {
   object-fit: cover;
   border-radius: 24px;
   border: 2px solid #5e5c5c;
+}
+
+.documentPreview {
+  width: 100%;
+  height: calc(100% - 54px);
+  min-height: 90px;
+  border: 2px solid #5e5c5c;
+  border-radius: 24px;
+  background: #070707;
 }
 
 .audioPreview {
@@ -665,7 +683,7 @@ button {
 
 .columnChild {
   display: grid;
-  grid-template-columns: 12px 1fr auto 18px;
+  grid-template-columns: 12px minmax(0, 1fr) auto 28px;
   align-items: center;
   gap: 9px;
   width: 100%;
@@ -704,7 +722,7 @@ button {
 .columnEmbedded {
   position: relative;
   display: grid;
-  grid-template-columns: 12px 1fr;
+  grid-template-columns: 12px 24px minmax(0, 1fr);
   gap: 9px;
   width: 100%;
   min-height: 58px;
@@ -715,8 +733,26 @@ button {
   color: #dddddd;
 }
 
+.columnChildDrag {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid #353535;
+  border-radius: 6px;
+  background: #101010;
+  color: #a8a8a8;
+  cursor: grab;
+  justify-self: center;
+}
+
+.columnChildDrag:active {
+  cursor: grabbing;
+}
+
 .columnEmbedded textarea,
 .columnEmbedded input {
+  grid-column: 3;
   width: 100%;
   min-width: 0;
   border: 0;
@@ -744,7 +780,7 @@ button {
 .columnEmbedded-todo .todoTitleInput,
 .columnEmbedded-todo .todoItem,
 .columnEmbedded-todo .todoAdd {
-  grid-column: 2;
+  grid-column: 3;
 }
 
 .todoItem {

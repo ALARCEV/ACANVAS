@@ -434,17 +434,17 @@ test("draws and erases a freehand stroke", async ({ page }) => {
   await page.reload({ waitUntil: "networkidle" });
 
   await page.getByTitle("Draw").click();
-  await page.mouse.move(420, 520);
+  await page.mouse.move(760, 520);
   await page.mouse.down();
-  await page.mouse.move(470, 560, { steps: 5 });
-  await page.mouse.move(530, 520, { steps: 5 });
+  await page.mouse.move(810, 560, { steps: 5 });
+  await page.mouse.move(870, 520, { steps: 5 });
   await page.mouse.up();
 
   await expect(page.locator(".drawingLayer path")).toHaveCount(1);
   await page.getByText("Eraser").click();
-  await page.mouse.move(470, 550);
+  await page.mouse.move(810, 550);
   await page.mouse.down();
-  await page.mouse.move(480, 555, { steps: 3 });
+  await page.mouse.move(820, 555, { steps: 3 });
   await page.mouse.up();
   await expect(page.locator(".drawingLayer path")).toHaveCount(0);
 });

@@ -38,12 +38,15 @@ import {
   checkForDesktopUpdate,
   fetchPreviewFromBackend,
   getBackupDirFromBackend,
+  getPathMetadata,
   loadWorkspaceFromBackend,
   openPathWithBackend,
   revealPathWithBackend,
   saveWorkspaceToBackend,
   selectBackupDirWithDialog,
-  setBackupDirInBackend
+  selectFilesWithDialog,
+  setBackupDirInBackend,
+  toAssetUrl
 } from "../lib/backend";
 import { createId, nowIso } from "../lib/ids";
 import { exportWorkspaceJson, loadWorkspace, saveWorkspace } from "../lib/storage";
@@ -64,6 +67,7 @@ const toolbar: Array<{ type: CardType; label: string; icon: typeof StickyNote }>
 
 const colors = ["#f0b86e", "#f26f66", "#6fc7e8", "#79c58a", "#b986e8", "#f2d76b"];
 const drawColors = ["#f0b86e", "#f26f66", "#6fc7e8", "#79c58a", "#b986e8", "#f2d76b", "#e5edf7", "#151b26"];
+const boardEmojis = ["📁", "🧭", "💡", "🎬", "📌", "🧠", "🧩", "🚀", "🎨", "📦", "🔖", "⭐"];
 const minZoom = 0.08;
 const maxZoom = 5;
 const zoomStep = 0.15;
@@ -110,10 +114,15 @@ export function App() {
   const [updateMessage, setUpdateMessage] = useState("");
   const boardRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const workspaceRef = useRef(workspace);
   const dragOffset = useRef({ x: 0, y: 0 });
   const lastPointerPoint = useRef({ x: 0, y: 0 });
   const lastCanvasClientPoint = useRef({ x: 360, y: 260 });
   const panStart = useRef({ clientX: 0, clientY: 0, x: 0, y: 0 });
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
   useEffect(() => {
     saveWorkspace(workspace);
@@ -140,6 +149,61 @@ export function App() {
     getBackupDirFromBackend()
       .then((path) => setBackupDir(path))
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const cards = workspace.cards.filter((card) =>
+      (card.type === "file" || card.type === "image") &&
+      "sourcePath" in card.content &&
+      card.content.sourcePath &&
+      !card.content.thumbnailUrl
+    );
+    if (cards.length === 0) return;
+    let cancelled = false;
+    Promise.all(cards.map(async (card) => {
+      if (!("sourcePath" in card.content) || !card.content.sourcePath) return null;
+      const thumbnailUrl = await toAssetUrl(card.content.sourcePath).catch(() => null);
+      return thumbnailUrl ? { id: card.id, thumbnailUrl } : null;
+    })).then((updates) => {
+      if (cancelled) return;
+      const patches = updates.filter((item): item is { id: string; thumbnailUrl: string } => Boolean(item));
+      if (patches.length === 0) return;
+      update((draft) => {
+        patches.forEach((patch) => {
+          const target = draft.cards.find((card) => card.id === patch.id);
+          if (target && (target.type === "file" || target.type === "image") && "thumbnailUrl" in target.content) {
+            target.content = { ...target.content, thumbnailUrl: patch.thumbnailUrl };
+          }
+        });
+        return draft;
+      }, false);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.cards]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type !== "drop" || event.payload.paths.length === 0) return;
+          const point = canvasPoint(event.payload.position.x, event.payload.position.y, workspaceRef.current);
+          createCardsFromPaths(event.payload.paths, point.x, point.y).catch(() => undefined);
+        })
+      )
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -283,11 +347,12 @@ export function App() {
       let card: CanvasCard;
       if (type === "board") {
         const color = colors[Math.floor(Math.random() * colors.length)];
+        const icon = boardEmojis[draft.boards.length % boardEmojis.length];
         const board: Board = {
           id: createId("board"),
           parentBoardId: currentBoard.id,
           title: "New board",
-          icon: "в—†",
+          icon,
           color,
           createdAt: now,
           updatedAt: now,
@@ -298,10 +363,10 @@ export function App() {
         card = makeCard(id, type, x, y, 180, 150, draft.cards.length + 1, {
           boardId: board.id,
           title: board.title,
-          icon: board.icon,
+          icon,
           color
         });
-        card.style = { background: "#151b26", color: "#e5edf7", accent: color, icon: board.icon };
+        card.style = { background: "#151b26", color: "#e5edf7", accent: color, icon };
       } else if (type === "link") {
         const raw = window.prompt("Paste URL");
         const url = normalizeUrl(raw ?? "");
@@ -433,8 +498,93 @@ export function App() {
     return true;
   }
 
-  function handleToolClick(type: CardType) {
+  async function createCardsFromPaths(paths: string[], x: number, y: number) {
+    const files = paths.filter(Boolean);
+    for (const [index, path] of files.entries()) {
+      const metadata = await getPathMetadata(path).catch(() => null);
+      if (metadata?.isDir) {
+        const id = createId("card");
+        const now = nowIso();
+        update((draft) => {
+          draft.cards.push({
+            id,
+            boardId: draft.currentBoardId,
+            type: "folder",
+            x: x + index * 24,
+            y: y + index * 24,
+            width: 280,
+            height: 140,
+            zIndex: draft.cards.length + 1,
+            style: { background: "#111723", color: "#e5edf7", accent: "#79c58a" },
+            content: {
+              title: fileNameFromPath(path),
+              path
+            },
+            createdAt: now,
+            updatedAt: now,
+            trashedAt: null
+          });
+          draft.selectedCardIds = [id];
+          return draft;
+        });
+        continue;
+      }
+      const mimeType = mimeFromPath(path);
+      const fileName = fileNameFromPath(path);
+      const thumbnailUrl = await toAssetUrl(path).catch(() => null);
+      const size = metadata?.size ?? 0;
+      const type: CardType = mimeType.startsWith("image/") || mimeType.startsWith("video/") || mimeType.startsWith("audio/") ? "image" : "file";
+      const id = createId("card");
+      const assetId = createId("asset");
+      const now = nowIso();
+      update((draft) => {
+        draft.assets.push({
+          id: assetId,
+          originalName: fileName,
+          mimeType,
+          size,
+          sourcePath: path,
+          createdAt: now
+        });
+        draft.cards.push({
+          id,
+          boardId: draft.currentBoardId,
+          type,
+          x: x + index * 24,
+          y: y + index * 24,
+          width: 300,
+          height: type === "image" ? 250 : 150,
+          zIndex: draft.cards.length + 1,
+          style: { background: "#151b26", color: "#e5edf7", accent: colors[(draft.cards.length + 1) % colors.length] },
+          content: {
+          assetId,
+          fileName,
+          mimeType,
+          size,
+          thumbnailUrl: thumbnailUrl ?? undefined,
+          sourcePath: path
+          },
+          createdAt: now,
+          updatedAt: now,
+          trashedAt: null
+        });
+        draft.selectedCardIds = [id];
+        return draft;
+      });
+    }
+  }
+
+  async function handleToolClick(type: CardType) {
     if (type === "file") {
+      const selectedPaths = await selectFilesWithDialog().catch(() => null);
+      if (selectedPaths && selectedPaths.length > 0) {
+        const rect = boardRef.current?.getBoundingClientRect();
+        const point = rect
+          ? canvasPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          : canvasPoint(lastCanvasClientPoint.current.x, lastCanvasClientPoint.current.y);
+        await createCardsFromPaths(selectedPaths, point.x, point.y);
+        return;
+      }
       uploadInputRef.current?.click();
       return;
     }
@@ -457,6 +607,7 @@ export function App() {
   }
 
   function toggleDraw() {
+    setActiveStroke(null);
     update((draft) => {
       draft.drawingSettings.enabled = !draft.drawingSettings.enabled;
       draft.selectedCardIds = [];
@@ -473,7 +624,7 @@ export function App() {
 
   function startDrawing(event: React.PointerEvent<HTMLElement>) {
     if (!workspace.drawingSettings.enabled || event.button !== 0) return false;
-    if ((event.target as HTMLElement).closest("button, input, textarea, a")) return false;
+    if ((event.target as HTMLElement).closest(".card, button, input, textarea, a")) return false;
     const point = canvasPoint(event.clientX, event.clientY);
     lastPointerPoint.current = point;
     if (workspace.drawingSettings.tool === "eraser") {
@@ -499,11 +650,18 @@ export function App() {
       eraseStrokeAt(point);
       return;
     }
-    setActiveStroke((stroke) => (stroke ? { ...stroke, points: [...stroke.points, point] } : null));
+    setActiveStroke((stroke) => {
+      if (!stroke) return null;
+      const previous = stroke.points.at(-1);
+      if (previous && distance(previous, point) < 2) return stroke;
+      return { ...stroke, points: [...stroke.points, point] };
+    });
   }
 
   function finishDrawing() {
-    if (!activeStroke || activeStroke.points.length < 2) {
+    const firstPoint = activeStroke?.points[0];
+    const lastPoint = activeStroke?.points.at(-1);
+    if (!activeStroke || activeStroke.points.length < 3 || !firstPoint || !lastPoint || distance(firstPoint, lastPoint) < 4) {
       setActiveStroke(null);
       return;
     }
@@ -628,11 +786,11 @@ export function App() {
     };
   }
 
-  function canvasPoint(clientX: number, clientY: number) {
+  function canvasPoint(clientX: number, clientY: number, state = workspace) {
     const rect = boardRef.current?.getBoundingClientRect();
     return {
-      x: (clientX - (rect?.left ?? 0) - workspace.pan.x) / workspace.zoom,
-      y: (clientY - (rect?.top ?? 0) - workspace.pan.y) / workspace.zoom
+      x: (clientX - (rect?.left ?? 0) - state.pan.x) / state.zoom,
+      y: (clientY - (rect?.top ?? 0) - state.pan.y) / state.zoom
     };
   }
 
@@ -674,6 +832,9 @@ export function App() {
       return;
     }
     const files = Array.from(event.dataTransfer.files);
+    if ("__TAURI_INTERNALS__" in window && files.length > 0) {
+      return;
+    }
     files.forEach((file, index) => createCard(resolveDroppedFileType(file), point.x + index * 24, point.y + index * 24, file));
   }
 
@@ -1144,7 +1305,17 @@ export function App() {
       const status = await checkForDesktopUpdate();
       setUpdateMessage(status === "available" ? "Update is available. Install it from the release notification." : "ACANVAS is up to date.");
     } catch (error) {
-      setUpdateMessage(error instanceof Error ? error.message : "Unable to check for updates.");
+      const message = error instanceof Error ? error.message : "";
+      const lowerMessage = message.toLowerCase();
+      const releaseUnavailable =
+        message.includes("404") ||
+        lowerMessage.includes("not found") ||
+        lowerMessage.includes("unable to get update") ||
+        lowerMessage.includes("failed to fetch") ||
+        lowerMessage.includes("network");
+      setUpdateMessage(releaseUnavailable
+        ? "Updater cannot reach the GitHub Release metadata yet. Publish latest.json and the installer in a public v0.1.0 release, then try again."
+        : message || "Unable to check for updates.");
     }
   }
 
@@ -1575,22 +1746,52 @@ function CardContent({
 
   if ((card.type === "file" || card.type === "image") && "fileName" in card.content) {
     const content = card.content;
+    const hasSourcePath = Boolean(content.sourcePath);
+    const canPreview = Boolean(content.thumbnailUrl && isPreviewableMime(content.mimeType));
     return (
-      <div className="fileCard">
+      <div
+        className="fileCard"
+        data-no-drag
+        onClick={() => {
+          if (content.sourcePath) onOpenPath(content.sourcePath);
+          else if (canPreview && content.thumbnailUrl) window.open(content.thumbnailUrl, "_blank", "noopener,noreferrer");
+        }}
+      >
         {renderFilePreview(content)}
         <strong>{content.fileName}</strong>
         <small>{formatBytes(content.size)} · {content.mimeType || "file"}</small>
-        <div className="fileActions" data-no-drag>
-          {content.thumbnailUrl && (
-            <button onClick={() => window.open(content.thumbnailUrl, "_blank", "noopener,noreferrer")}>
+        <div className="fileActions">
+          {canPreview && (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                window.open(content.thumbnailUrl ?? "", "_blank", "noopener,noreferrer");
+              }}
+            >
               Preview
             </button>
           )}
-          {content.sourcePath && (
+          {hasSourcePath ? (
             <>
-              <button onClick={() => onOpenPath(content.sourcePath ?? "")}>Open source</button>
-              <button onClick={() => onRevealPath(content.sourcePath ?? "")}>Reveal</button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenPath(content.sourcePath ?? "");
+                }}
+              >
+                Open
+              </button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRevealPath(content.sourcePath ?? "");
+                }}
+              >
+                Show in folder
+              </button>
             </>
+          ) : (
+            <span className="filePathHint">Use Upload again to keep a Windows path.</span>
           )}
         </div>
       </div>
@@ -1792,57 +1993,63 @@ function ColumnChild({
   if (card.type === "board" && "boardId" in card.content) {
     const content = card.content as BoardContent;
     return (
-      <button
+      <div
         data-no-drag
         draggable
         className="columnChild"
-        onDragStart={(event) => onDragStart(card.id, columnId, event)}
         onClick={() => onOpenBoard(content.boardId)}
+        onDragStart={(event) => onDragStart(card.id, columnId, event)}
         title="Open board"
       >
         <span className="columnChildAccent" style={{ background: content.color }} />
         <strong>{label}</strong>
         <small>Board</small>
-        <CornerUpRight size={15} />
-      </button>
+        <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
+      </div>
     );
   }
 
   if (card.type === "link" && "url" in card.content) {
     const content = card.content as LinkContent;
     return (
-      <button
+      <div
         data-no-drag
         draggable
         className="columnChild"
-        onDragStart={(event) => onDragStart(card.id, columnId, event)}
         onClick={() => window.open(content.url, "_blank", "noopener,noreferrer")}
+        onDragStart={(event) => onDragStart(card.id, columnId, event)}
         title="Open link"
       >
         <span className="columnChildAccent" style={{ background: accent }} />
         <strong>{label}</strong>
         <small>Link</small>
-        <CornerUpRight size={15} />
-      </button>
+        <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
+      </div>
     );
   }
 
   if (card.type === "folder" && "path" in card.content) {
     const content = card.content as FolderContent;
     return (
-      <button
+      <div
         data-no-drag
         draggable
         className="columnChild"
-        onDragStart={(event) => onDragStart(card.id, columnId, event)}
         onClick={() => onOpenPath(content.path)}
+        onDragStart={(event) => onDragStart(card.id, columnId, event)}
         title="Open folder"
       >
         <span className="columnChildAccent" style={{ background: accent }} />
         <strong>{label}</strong>
         <small>Folder</small>
-        <CornerUpRight size={15} />
-      </button>
+        <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
+      </div>
     );
   }
 
@@ -1850,6 +2057,9 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-note" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
+        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
         <textarea value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
       </div>
     );
@@ -1859,6 +2069,9 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-title" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
+        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
         <input value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
       </div>
     );
@@ -1868,6 +2081,9 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-comment" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
+        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
         <textarea value={card.content.text} onChange={(event) => onUpdateCardContent(card.id, { text: event.target.value })} />
       </div>
     );
@@ -1878,6 +2094,9 @@ function ColumnChild({
     return (
       <div data-no-drag draggable className="columnEmbedded columnEmbedded-todo" onDragStart={(event) => onDragStart(card.id, columnId, event)}>
         <span className="columnChildAccent" style={{ background: accent }} />
+        <button className="columnChildDrag" draggable onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+          <CornerUpRight size={15} />
+        </button>
         <input
           className="todoTitleInput"
           value={content.title}
@@ -1930,19 +2149,21 @@ function ColumnChild({
   }
 
   return (
-    <button
+    <div
       data-no-drag
       draggable
       className="columnChild"
-      onDragStart={(event) => onDragStart(card.id, columnId, event)}
       onClick={() => onPopOut(card.id, columnId)}
+      onDragStart={(event) => onDragStart(card.id, columnId, event)}
       title="Pop out to canvas"
     >
       <span className="columnChildAccent" style={{ background: accent }} />
       <strong>{label}</strong>
       <small>{card.type}</small>
-      <CornerUpRight size={15} />
-    </button>
+      <button className="columnChildDrag" draggable onClick={(event) => event.stopPropagation()} onDragStart={(event) => onDragStart(card.id, columnId, event)}>
+        <CornerUpRight size={15} />
+      </button>
+    </div>
   );
 }
 
@@ -2060,6 +2281,9 @@ function renderFilePreview(content: { thumbnailUrl?: string; mimeType: string; f
   if (content.thumbnailUrl && content.mimeType.startsWith("video/")) {
     return <video src={content.thumbnailUrl} controls />;
   }
+  if (content.thumbnailUrl && content.mimeType === "application/pdf") {
+    return <iframe className="documentPreview" src={content.thumbnailUrl} title={content.fileName} />;
+  }
   if (content.thumbnailUrl && content.mimeType.startsWith("audio/")) {
     return (
       <div className="audioPreview">
@@ -2069,6 +2293,46 @@ function renderFilePreview(content: { thumbnailUrl?: string; mimeType: string; f
     );
   }
   return <FileUp size={34} />;
+}
+
+function isPreviewableMime(mimeType: string) {
+  return mimeType.startsWith("image/") ||
+    mimeType.startsWith("video/") ||
+    mimeType.startsWith("audio/") ||
+    mimeType === "application/pdf";
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Local file";
+}
+
+function mimeFromPath(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif",
+    bmp: "image/bmp",
+    svg: "image/svg+xml",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm",
+    mkv: "video/x-matroska",
+    avi: "video/x-msvideo",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    pdf: "application/pdf",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  };
+  return map[ext] ?? "application/octet-stream";
 }
 
 function renderMarkdown(text: string) {

@@ -1,13 +1,25 @@
 import type { WorkspaceState } from "../types";
-import { createInitialBoards, createInitialCards } from "./seed";
+import { nowIso } from "./ids";
 
 const storageKey = "acanvas.workspace.v1";
 
 export function createInitialWorkspace(): WorkspaceState {
-  const boards = createInitialBoards();
+  const now = nowIso();
   return {
-    boards,
-    cards: createInitialCards(boards),
+    boards: [
+      {
+        id: "board_home",
+        parentBoardId: null,
+        title: "Home",
+        icon: "Home",
+        color: "#f0b86e",
+        createdAt: now,
+        updatedAt: now,
+        sortIndex: 0,
+        trashedAt: null
+      }
+    ],
+    cards: [],
     assets: [],
     drawingStrokes: [],
     drawingSettings: {
