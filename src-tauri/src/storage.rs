@@ -5,6 +5,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+const MAX_ASSET_BACKUP_BYTES: u64 = 20 * 1024 * 1024;
+
 pub struct AppStore {
     db: Mutex<Connection>,
     app_dir: PathBuf,
@@ -48,8 +50,6 @@ impl AppStore {
             "insert into workspace_snapshots (id, payload, created_at) values (?1, ?2, datetime('now'))",
             params![uuid::Uuid::new_v4().to_string(), workspace.to_string()],
         )?;
-        drop(db);
-        self.sync_backup().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 
@@ -110,8 +110,32 @@ impl AppStore {
             .unwrap_or_else(|_| json!({ "schema": "acanvas.workspace.v1" }));
         let workspace_path = backup_dir.join("acanvas-workspace.json");
         std::fs::write(&workspace_path, serde_json::to_string_pretty(&payload).unwrap_or_default())?;
+        let snapshots_dir = backup_dir.join("snapshots");
+        std::fs::create_dir_all(&snapshots_dir)?;
+        let snapshot_path = snapshots_dir.join(format!(
+            "acanvas-workspace-{}.json",
+            chrono::Utc::now().format("%Y-%m-%d-%H%M%S")
+        ));
+        std::fs::write(&snapshot_path, serde_json::to_string_pretty(&payload).unwrap_or_default())?;
         sync_asset_backup(&backup_dir, &payload)?;
-        Ok(Some(workspace_path.to_string_lossy().to_string()))
+        Ok(Some(snapshot_path.to_string_lossy().to_string()))
+    }
+
+    pub fn save_clipboard_asset(&self, file_name: String, mime_type: String, bytes: Vec<u8>) -> std::io::Result<PathBuf> {
+        let assets_dir = self.app_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir)?;
+        let original_name = Path::new(file_name.trim())
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| default_clipboard_file_name(&mime_type));
+        let target = assets_dir.join(format!(
+            "clipboard-{}-{}",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+            sanitize_file_name(original_name)
+        ));
+        std::fs::write(&target, bytes)?;
+        Ok(target)
     }
 }
 
@@ -191,6 +215,10 @@ fn sync_asset_backup(backup_dir: &Path, payload: &serde_json::Value) -> std::io:
         return Ok(());
     };
     for asset in assets {
+        let size = asset.get("size").and_then(|value| value.as_u64()).unwrap_or(0);
+        if size > MAX_ASSET_BACKUP_BYTES {
+            continue;
+        }
         let source_path = asset
             .get("sourcePath")
             .and_then(|value| value.as_str())
@@ -227,6 +255,17 @@ fn sanitize_file_name(value: &str) -> String {
             _ => ch,
         })
         .collect()
+}
+
+fn default_clipboard_file_name(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/jpeg" => "image.jpg",
+        "image/webp" => "image.webp",
+        "image/gif" => "image.gif",
+        "image/bmp" => "image.bmp",
+        "image/svg+xml" => "image.svg",
+        _ => "image.png",
+    }
 }
 
 fn to_io_error(error: rusqlite::Error) -> std::io::Error {

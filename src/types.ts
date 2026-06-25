@@ -7,9 +7,11 @@ export type CardType =
   | "column"
   | "comment"
   | "line"
+  | "drawing"
   | "todo"
   | "title"
-  | "folder";
+  | "folder"
+  | "widget";
 
 export interface Board {
   id: string;
@@ -54,9 +56,11 @@ export type CardContent =
   | ColumnContent
   | CommentContent
   | LineContent
+  | DrawingContent
   | TodoContent
   | TitleContent
-  | FolderContent;
+  | FolderContent
+  | WidgetContent;
 
 export interface NoteContent {
   text: string;
@@ -65,6 +69,7 @@ export interface NoteContent {
 
 export interface LinkContent {
   url: string;
+  label?: string;
   title: string;
   description: string;
   imageUrl?: string;
@@ -102,9 +107,18 @@ export interface CommentContent {
 
 export interface LineContent {
   points: Array<{ x: number; y: number }>;
+  mode?: "free" | "horizontal" | "vertical";
+  width?: number;
+  arrowStart?: boolean;
   arrowEnd: boolean;
   sourceCardId?: string;
   targetCardId?: string;
+}
+
+export interface DrawingContent {
+  points: Array<{ x: number; y: number }>;
+  color: string;
+  width: number;
 }
 
 export interface TodoContent {
@@ -122,6 +136,13 @@ export interface FolderContent {
   path: string;
 }
 
+export interface WidgetContent {
+  title: string;
+  sourceType: "html" | "url" | "path";
+  source: string;
+  refreshSeconds: number;
+}
+
 export interface DrawStroke {
   id: string;
   boardId: string;
@@ -134,9 +155,12 @@ export interface DrawStroke {
 
 export interface DrawingSettings {
   enabled: boolean;
-  tool: "pen" | "eraser";
+  tool: "pen" | "eraser" | "line";
   color: string;
   width: number;
+  lineMode?: "free" | "horizontal" | "vertical";
+  arrowStart?: boolean;
+  arrowEnd?: boolean;
 }
 
 export interface Asset {

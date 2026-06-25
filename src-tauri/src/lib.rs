@@ -9,6 +9,13 @@ struct PathMetadata {
     is_dir: bool,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredClipboardAsset {
+    source_path: String,
+    size: u64,
+}
+
 #[tauri::command]
 fn load_workspace(store: State<'_, AppStore>) -> Result<serde_json::Value, String> {
     store.load_workspace().map_err(|error| error.to_string())
@@ -30,6 +37,20 @@ fn export_workspace(store: State<'_, AppStore>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn write_workspace_export(path: String, workspace: serde_json::Value) -> Result<String, String> {
+    let mut target = std::path::PathBuf::from(path);
+    if target.extension().is_none() {
+        target.set_extension("acanvas.json");
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let payload = serde_json::to_string_pretty(&workspace).map_err(|error| error.to_string())?;
+    std::fs::write(&target, payload).map_err(|error| error.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn get_backup_dir(store: State<'_, AppStore>) -> Result<Option<String>, String> {
     store.get_backup_dir().map_err(|error| error.to_string())
 }
@@ -42,6 +63,23 @@ fn set_backup_dir(store: State<'_, AppStore>, path: String) -> Result<(), String
 #[tauri::command]
 fn backup_now(store: State<'_, AppStore>) -> Result<Option<String>, String> {
     store.sync_backup().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_clipboard_asset(
+    store: State<'_, AppStore>,
+    file_name: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+) -> Result<StoredClipboardAsset, String> {
+    let size = bytes.len() as u64;
+    let path = store
+        .save_clipboard_asset(file_name, mime_type, bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(StoredClipboardAsset {
+        source_path: path.to_string_lossy().to_string(),
+        size,
+    })
 }
 
 #[tauri::command]
@@ -118,9 +156,11 @@ pub fn run() {
             save_workspace,
             fetch_link_preview,
             export_workspace,
+            write_workspace_export,
             get_backup_dir,
             set_backup_dir,
             backup_now,
+            save_clipboard_asset,
             path_metadata,
             open_path,
             reveal_path

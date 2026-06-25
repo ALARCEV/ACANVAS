@@ -19,6 +19,39 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: #4a4a4a transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 56px;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #4a4a4a;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #5a5a5a;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: #686868;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 body {
@@ -60,21 +93,13 @@ button {
 .topbar {
   grid-column: 1 / 4;
   display: grid;
-  grid-template-columns: auto minmax(160px, 1fr) auto minmax(430px, auto);
+  grid-template-columns: auto minmax(120px, 0.8fr) minmax(240px, 1.2fr) minmax(430px, auto);
   align-items: center;
   gap: 14px;
   padding: 0 14px;
   border-bottom: 1px solid var(--line);
   background: #141414;
   z-index: 20;
-}
-
-.topbar h1 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 750;
-  letter-spacing: 0;
-  text-align: center;
 }
 
 .brandButton,
@@ -132,6 +157,101 @@ button {
   height: 13px;
   border-radius: 4px;
   flex: 0 0 auto;
+}
+
+.boardTabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 0;
+}
+
+.boardTab {
+  display: inline-grid;
+  grid-template-columns: 10px minmax(44px, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 176px;
+  height: 34px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #9f9f9f;
+  padding: 0 7px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.boardTab:hover {
+  background: #1a1a1a;
+  color: #dddddd;
+}
+
+.boardTab.isActive {
+  border-color: #303030;
+  background: #202020;
+  color: #eeeeee;
+}
+
+.boardTabColor {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.boardTabTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.boardTabClose {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 5px;
+  color: #878787;
+}
+
+.boardTabClose:hover {
+  background: #303030;
+  color: #eeeeee;
+}
+
+.contextMenu {
+  position: fixed;
+  z-index: 120;
+  min-width: 204px;
+  border: 1px solid #303030;
+  border-radius: 8px;
+  background: #111111;
+  padding: 5px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.26);
+}
+
+.contextMenu button {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: #dddddd;
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+.contextMenu button:hover {
+  background: #202020;
 }
 
 .topActions {
@@ -217,6 +337,20 @@ button {
   line-height: 1.1;
 }
 
+.toolbarGhost {
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
+  transform: translate(12px, 12px);
+  border: 1px solid #5e5c5c;
+  border-radius: 7px;
+  background: #070707;
+  color: #dddddd;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .toolSpacer {
   margin-top: auto;
 }
@@ -269,7 +403,8 @@ button {
   min-height: 0;
 }
 
-.card-line {
+.card-line,
+.card-drawing {
   overflow: visible;
   border-color: transparent !important;
   background: transparent !important;
@@ -284,8 +419,9 @@ button {
   box-shadow: 0 0 0 2px rgba(214, 163, 93, 0.3), var(--shadow);
 }
 
-.card-line.isSelected {
-  box-shadow: none;
+.card-line.isSelected,
+.card-drawing.isSelected {
+  box-shadow: 0 0 0 1px rgba(214, 163, 93, 0.42);
 }
 
 .dragHandle {
@@ -310,7 +446,8 @@ button {
 
 .card:hover .dragHandle,
 .card.isSelected .dragHandle,
-.card-line .dragHandle {
+.card-line .dragHandle,
+.card-drawing .dragHandle {
   opacity: 1;
 }
 
@@ -447,25 +584,42 @@ button {
 }
 
 .titleCard {
-  display: grid;
+  display: flex;
   width: 100%;
   height: 100%;
-  place-items: center;
-  padding: 14px 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 24px;
+  overflow: hidden;
 }
 
-.titleCard input {
+.titleCard textarea {
+  display: block;
   width: 100%;
+  min-height: 0;
+  max-height: 100%;
   border: 0;
   outline: 0;
+  resize: none;
   background: transparent;
   color: inherit;
   font-size: 24px;
   font-weight: 850;
   text-align: center;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.2;
+  scrollbar-width: none;
+  field-sizing: content;
+}
+
+.titleCard textarea::-webkit-scrollbar {
+  display: none;
 }
 
 .linkCard,
+.widgetCard,
 .fileCard,
 .folderCard,
 .columnCard,
@@ -479,8 +633,12 @@ button {
   display: flex;
   position: relative;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
   padding-left: 18px;
+  padding-right: 26px;
+  overflow: hidden;
 }
 
 .cardAccent {
@@ -492,16 +650,55 @@ button {
   border-radius: 0;
 }
 
+.linkLabelInput {
+  width: 100%;
+  min-height: 34px;
+  min-width: 0;
+  border: 0;
+  border-bottom: 1px solid rgba(94, 92, 92, 0.72);
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: #dddddd;
+  font: inherit;
+  font-weight: 800;
+  line-height: 1.25;
+  padding: 0 0 7px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.linkLabelInput::placeholder {
+  color: #686868;
+}
+
+.linkLabelInput:focus {
+  border-color: #f0b86e;
+}
+
+.linkPreviewContent {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 9px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .linkCard a {
   color: #ff7b54;
   font-weight: 750;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
 }
 
 .linkCard p,
 .sidePanel p {
   margin: 0;
   color: #b4c1d2;
-  line-height: 1.5;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
 }
 
 .linkCard small,
@@ -510,6 +707,146 @@ button {
 .columnCard span,
 .commentCard small {
   color: #8997aa;
+}
+
+.linkCard small {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widgetCard {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+  padding-right: 26px;
+}
+
+.widgetHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px 62px;
+  gap: 8px;
+}
+
+.widgetHeader textarea,
+.widgetHeader input,
+.widgetHeader select,
+.widgetEditor textarea {
+  min-width: 0;
+  border: 1px solid #5e5c5c;
+  border-radius: 8px;
+  outline: 0;
+  background: #070707;
+  color: #dddddd;
+  font: inherit;
+}
+
+.widgetHeader textarea,
+.widgetHeader input,
+.widgetHeader select {
+  height: 30px;
+  padding: 0 9px;
+}
+
+.widgetHeader textarea {
+  resize: none;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.widgetHeader input:focus,
+.widgetHeader textarea:focus,
+.widgetHeader select:focus,
+.widgetEditor textarea:focus {
+  border-color: #f0b86e;
+}
+
+.widgetRefreshInput {
+  text-align: center;
+}
+
+.widgetEditor {
+  flex: 0 0 auto;
+  border: 1px solid #2c2c2c;
+  border-radius: 8px;
+  background: #101010;
+  overflow: hidden;
+}
+
+.widgetEditor summary {
+  padding: 7px 10px;
+  color: #d6a35d;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.widgetEditor textarea {
+  display: block;
+  width: 100%;
+  height: 96px;
+  resize: vertical;
+  border-width: 1px 0 0;
+  border-radius: 0;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.widgetFrame {
+  display: grid;
+  flex: 1;
+  min-height: 96px;
+  overflow: hidden;
+  place-items: stretch;
+  border: 2px solid #5e5c5c;
+  border-radius: 24px;
+  background: #070707;
+}
+
+.widgetFrame iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #070707;
+}
+
+.widgetMedia {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: #070707;
+}
+
+.widgetAudio {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  padding: 18px;
+  color: #dddddd;
+  background: #070707;
+}
+
+.widgetAudio audio {
+  width: min(100%, 360px);
+}
+
+.widgetFrame .emptyHint {
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  color: #8f8f8f;
+  text-align: center;
 }
 
 .fileCard {
@@ -612,17 +949,22 @@ button {
   cursor: default;
 }
 
-.boardCardButton input {
+.boardCardButton textarea {
   width: 100%;
+  min-height: 42px;
   min-width: 0;
   border: 0;
   outline: 0;
+  resize: none;
   background: transparent;
   color: inherit;
   font: inherit;
   font-weight: 850;
   text-align: center;
   cursor: text;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.18;
 }
 
 .boardCardButton button {
@@ -658,13 +1000,19 @@ button {
   min-height: 0;
 }
 
-.columnCard input {
+.columnCard textarea {
+  width: 100%;
+  min-height: 34px;
   border: 0;
   outline: 0;
+  resize: none;
   background: transparent;
   color: inherit;
   font-size: 18px;
   font-weight: 750;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.24;
 }
 
 .columnDrop {
@@ -763,10 +1111,12 @@ button {
 
 .columnEmbedded textarea {
   min-height: 54px;
-  resize: vertical;
+  resize: none;
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 
-.columnEmbedded-title input {
+.columnEmbedded-title textarea {
   font-weight: 800;
 }
 
@@ -800,19 +1150,30 @@ button {
 
 .todoTextInput,
 .todoTitleInput {
+  display: block;
+  width: 100%;
+  max-height: 100%;
   min-width: 0;
   border: 0;
   outline: 0;
+  resize: none;
   background: transparent;
   color: inherit;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.28;
+  field-sizing: content;
 }
 
 .todoTitleInput {
   font-weight: 850;
+  min-height: 26px;
 }
 
 .todoTextInput {
   color: #d5deeb;
+  min-height: 24px;
 }
 
 .todoTextInput:focus,
@@ -898,6 +1259,13 @@ button {
   filter: none;
 }
 
+.drawingCard {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
 .drawingLayer {
   position: absolute;
   inset: 0;
@@ -937,6 +1305,16 @@ button {
   font-size: 12px;
 }
 
+.zoomDock .zoomDockIcon {
+  min-width: 38px;
+  border-left: 1px solid var(--line);
+}
+
+.zoomDock button:hover {
+  background: #1c1c1c;
+  color: #f0f0f0;
+}
+
 .selectionBox {
   position: absolute;
   z-index: 10;
@@ -959,8 +1337,12 @@ button {
 
 .segmented {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
+}
+
+.segmentedCompact {
+  grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
 }
 
 .segmented button {
@@ -969,10 +1351,12 @@ button {
   justify-content: center;
   gap: 8px;
   height: 34px;
+  padding: 0 8px;
   border-radius: 7px;
   background: #1a1a1a;
   color: #c8c8c8;
   cursor: pointer;
+  font-size: 12px;
 }
 
 .segmented button.isSelected {
@@ -1160,6 +1544,23 @@ button {
   font-size: 13px;
 }
 
+.settingsGroupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settingsGroupHeader button {
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #171717;
+  color: #dddddd;
+  padding: 0 9px;
+  cursor: pointer;
+}
+
 .settingsGroup p,
 .settingsNote {
   margin: 0;
@@ -1171,6 +1572,59 @@ button {
 
 .settingsNote {
   color: #d6a35d;
+}
+
+.settingsField {
+  display: grid;
+  gap: 6px;
+  color: #a8a8a8;
+  font-size: 12px;
+}
+
+.settingsField select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #171717;
+  color: #dddddd;
+  padding: 0 10px;
+  font: inherit;
+}
+
+.settingsField select:focus {
+  outline: 1px solid rgba(240, 184, 110, 0.72);
+  outline-offset: 1px;
+}
+
+.hotkeyList {
+  display: grid;
+  gap: 7px;
+}
+
+.hotkeyRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 66px;
+  align-items: center;
+  gap: 10px;
+  color: #c8c8c8;
+  font-size: 12px;
+}
+
+.hotkeyRow input {
+  width: 66px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: 0;
+  background: #171717;
+  color: #dddddd;
+  text-align: center;
+  font-weight: 800;
+}
+
+.hotkeyRow input:focus {
+  border-color: #d6a35d;
 }
 
 .emptyHint {
@@ -1219,11 +1673,12 @@ button {
   }
 
   .topbar {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(96px, 0.7fr) minmax(160px, 1fr) auto;
+    gap: 8px;
   }
 
-  .topbar h1 {
-    display: none;
+  .boardTab {
+    flex-basis: 144px;
   }
 
   .searchBox {
